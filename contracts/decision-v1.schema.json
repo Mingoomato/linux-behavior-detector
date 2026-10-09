@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Behavior decision v1",
+  "type": "object",
+  "required": ["schema_version", "decision_id", "ruleset_revision", "entity_key", "score", "decision", "simulation_only", "source_event_ids"],
+  "properties": {
+    "schema_version": {"const": "decision.v1"},
+    "decision_id": {"type": "string"},
+    "ruleset_revision": {"type": "string"},
+    "entity_key": {"type": "string"},
+    "score": {"type": "integer", "minimum": 0},
+    "decision": {"enum": ["benign", "suspicious", "unknown"]},
+    "simulation_only": {"const": true},
+    "source_event_ids": {"type": "array", "items": {"type": "string"}},
+    "reasons": {"type": "array", "items": {"type": "string"}}
+  }
+}

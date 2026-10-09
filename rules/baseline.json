@@ -1,0 +1,16 @@
+{
+  "schema_version": "rules.v1",
+  "revision": "lab-baseline-001",
+  "window_seconds": 30,
+  "lateness_tolerance_ms": 2000,
+  "max_entities": 10000,
+  "min_event_count": 10,
+  "rewrite_threshold": 40,
+  "rename_threshold": 30,
+  "delete_threshold": 30,
+  "rewrite_weight": 60,
+  "rename_weight": 60,
+  "delete_weight": 60,
+  "extension_types_threshold": 8,
+  "score_cutoff": 60
+}
