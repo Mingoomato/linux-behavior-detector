@@ -6,17 +6,17 @@
 
 ## 2. Event parsing
 
-`load_events` reads one line at a time. `bdetect::json::Parser` in `include/bdetect/json.hpp` builds a value tree from owned `std::string`, `std::map`, and `std::vector` values. It rejects duplicate object keys, control bytes, invalid escapes, unsupported Unicode surrogate escapes, nesting beyond 32, and JSON text larger than 1 MiB.
+`load_events` uses `read_limited_line` to read at most 1 MiB per record before adding another byte, then `valid_utf8` rejects malformed UTF-8 before parsing. `bdetect::json::Parser` in `include/bdetect/json.hpp` builds a value tree from owned `std::string`, `std::map`, and `std::vector` values. It rejects duplicate object keys, control bytes, invalid escapes, unsupported Unicode surrogate escapes, nesting beyond 32, and JSON text larger than 1 MiB. The importer also applies explicit length limits to event IDs, host IDs, kinds, and paths.
 
 `required` enforces presence; `string_or` extracts expected strings. `parse_time` converts an ISO-like timestamp to epoch seconds through `timegm`. The importer retains event ID, host ID, kind, path, timestamp, and coverage. Any exception gains line context.
 
 ## 3. Rules and aggregation
 
-`load_rules` requires `schema_version=rules.v1`, reads window size, minimum sample count, thresholds, and score cutoff, then rejects selected out-of-range values. `evaluate` floors the event epoch to a fixed window bucket and groups event pointers by `(host, start)`.
+`load_rules` requires `schema_version=rules.v1`, reads window size, lateness tolerance, host bound, minimum sample count, thresholds, and score cutoff, then validates integer ranges and limits the window to 10, 30, or 60 seconds. `normalize_events` removes exact duplicate IDs, marks conflicting IDs, drops per-host events that arrive later than the configured tolerance, checks host cardinality, and sorts the accepted copy by host, event time, then ID.
 
-For each group, sets count unique modified/renamed/deleted paths, extensions, and source event IDs. Degraded or unsupported coverage yields `unknown`; low sample count also yields `unknown`. Otherwise threshold checks add fixed rule contributions and the score cutoff selects benign or suspicious.
+`evaluate` visits each distinct event timestamp for a host as a window endpoint. A moving left index skips events older than `endpoint - window_seconds`; the remaining range is the current sliding window. Sets count unique modified/renamed/deleted paths, extensions, and source event IDs. Unknown/degraded coverage, conflicting IDs, late events, or insufficient sample count yields `unknown`; otherwise threshold checks add the current named contributions and the score cutoff selects benign or suspicious.
 
-This is intentionally easy to inspect, not a general rule DSL. Some configured weights and lateness settings are not fully used, duplicates can contribute to the sample count, and windows are fixed buckets rather than rolling windows.
+This is intentionally easy to inspect, not a general rule DSL. Replay is offline rather than paced by a monotonic clock; out-of-tolerance events are excluded and lower that host's decisions to unknown. Missing records cannot be detected without source sequence metadata. Some configured weights remain unused.
 
 ## 4. Output and metrics
 
@@ -30,4 +30,4 @@ This is intentionally easy to inspect, not a general rule DSL. Some configured w
 
 ## 6. Memory and resource review
 
-`load_events` stores the entire corpus in memory. `evaluate` adds maps of non-owning `Event*` pointers and copies unique path strings into sets. Pointer lifetimes are safe only because the source vector remains alive and unchanged. Streams are RAII-managed. There are no worker threads; bounded streaming backpressure is not implemented.
+`load_events` stores the entire corpus in memory; normalization creates a second owning vector. `evaluate` uses non-owning `Event*` pointers into that stable normalized vector and copies unique path strings into per-window sets. Streams are RAII-managed. There are no worker threads; bounded streaming backpressure is not implemented.

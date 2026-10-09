@@ -10,4 +10,4 @@ Only event metadata is consumed. The engine does not read file contents or envir
 
 ## Residual risks
 
-The custom JSON parser rejects UTF-16 surrogate escapes and accepts numeric syntax through the C library parser; extensive standards conformance and fuzzing have not been established. Rules and fixtures are not a representative malware dataset. Fixed windows can split bursts at boundaries. Synthetic performance says nothing about real-world efficacy.
+The custom JSON parser rejects UTF-16 surrogate escapes and accepts numeric syntax through the C library parser; extensive standards conformance and fuzzing have not been established. Rules and fixtures are not a representative malware dataset. Event-time windowing cannot detect missing records unless the producer supplies sequence metadata, and late or conflicting records degrade the host result. Synthetic performance says nothing about real-world efficacy.

@@ -2,17 +2,17 @@
 
 These exercises are unsolved. No solution patch is included before an attempt. Use synthetic records only; do not run malware or use personal telemetry.
 
-## Exercise 1 — Duplicate and late event handling
+## Exercise 1 — Detecting missing events without inventing evidence
 
-**Goal:** Make sample counts and decisions robust to duplicate IDs and out-of-order timestamps.
+**Goal:** Extend event provenance so a dropped source record can be detected when the producer supports sequencing.
 
-**Starting points:** `load_events`, `parse_time`, `evaluate`, `lateness_tolerance_ms` in `rules/baseline.json`, and `docs/TEST_PLAN.md`.
+**Starting points:** `Event`, `load_events`, `normalize_events`, the event.v1 producer contract, and `docs/TEST_PLAN.md`.
 
-Create a small JSONL corpus with one duplicate ID, events inside the lateness tolerance, and one event outside it. Define the exact policy for duplicate and late records, preserve unknown coverage when evidence cannot be trusted, and add deterministic regression tests.
+Define an optional per-source sequence field and its reset/session semantics. Create records with a continuous sequence, a gap, a restart, and a duplicate. Mark only the affected source/host interval unknown when a gap is proven; absence of a sequence field must remain “not observable,” not a fabricated gap.
 
-**Constraints:** Keep record and total-event limits. Never infer an actor. Do not convert out-of-order or degraded evidence into benign.
+**Constraints:** Keep record and total-event limits. Never infer an actor or assume sequence numbers are globally unique across hosts/sessions. Do not convert out-of-order or degraded evidence into benign.
 
-**Acceptance:** Repeated runs yield normalized identical output; each source ID follows the documented policy; the outside-tolerance record is represented explicitly.
+**Acceptance:** Tests distinguish a proven sequence gap from unavailable sequence metadata, and repeated replays produce identical unknown/degraded intervals.
 
 ## Exercise 2 — Rule contribution and rule hash
 

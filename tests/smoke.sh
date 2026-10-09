@@ -24,4 +24,7 @@ with open(sys.argv[1], encoding="utf-8") as f:
 assert (result["tp"], result["fp"], result["tn"], result["fn"], result["unknown"]) == (4, 0, 8, 0, 0), result
 PY
 
+python3 "$root_dir/tests/window_replay.py" "$bin" \
+    "$root_dir/rules/baseline.json" "$tmp"
+
 echo "BHD synthetic fixture smoke: PASS"

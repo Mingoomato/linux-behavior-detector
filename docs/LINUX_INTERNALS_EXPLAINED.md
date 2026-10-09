@@ -6,9 +6,9 @@ The classifier does not subscribe to a kernel event source. It consumes a file t
 
 ## File I/O and timestamps
 
-`std::ifstream`/`std::ofstream` wrap host file descriptors and close them through RAII. `std::getline` creates one string per line; the JSON parser checks whether that string exceeds 1 MiB afterward. Because `getline` may allocate the whole line first, a malicious oversized record can temporarily exceed the intended memory bound.
+`std::ifstream`/`std::ofstream` wrap host file descriptors and close them through RAII. `read_limited_line` reads one byte at a time into a reused `std::string` and stops at 1 MiB before appending more input. The importer also caps event ID, host ID, kind, and path lengths, limits total events, and checks unique host cardinality from the rules. These bounds constrain one record and selected indexes, but the corpus and normalized copy still reside in memory together.
 
-`parse_time` uses GNU/Linux `timegm` to convert a UTC broken-down time into epoch seconds, with one-second precision. It does not currently use a monotonic replay timer. A real replay clock must distinguish event-time order from local elapsed time (`CLOCK_MONOTONIC`) and specify late/missing-event behavior.
+`parse_time` uses GNU/Linux `timegm` to convert a UTC broken-down time into epoch seconds, with one-second precision. Replay checks per-host arrival order against a configured lateness tolerance, removes exact duplicates, marks conflicts/too-late input unknown, and sorts accepted events by event time. It evaluates a rolling interval at each distinct event second. It still does not use a separate wall-clock-paced monotonic timer, and cannot identify a missing source record without a sequence number. A streaming design would use `CLOCK_MONOTONIC` for local deadlines while keeping event timestamps as a separate clock domain.
 
 ## Kernel event-source options
 
@@ -18,7 +18,7 @@ There is no epoll, poll, io_uring, fanotify, eBPF, or BPF LSM code in the curren
 
 ## Failure and resource handling
 
-Malformed JSON, bad required fields, invalid selected rule bounds, missing files/labels, or unwritable output produce an exception and nonzero exit. The corpus is accumulated before scoring, so the memory use scales with total records. Event cardinality is capped at one million, but per-window entity bounds and streaming retention are incomplete. Output replacement is not atomic.
+Malformed JSON, bad required fields, invalid rule bounds, missing files/labels, or unwritable output produce an exception and nonzero exit. The corpus is accumulated before scoring, so memory use scales with total records. Total events are capped at one million and host entities have a configurable bound, but streaming retention is not implemented. Output replacement is not atomic. Unknown/degraded coverage, conflicting IDs, and too-late records produce `unknown` rather than benign.
 
 ## Official references
 

@@ -1,5 +1,6 @@
 #include "bdetect/json.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -11,19 +12,23 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
 using bdetect::json::Value;
+constexpr std::size_t MAX_RECORD_BYTES = 1024U * 1024U;
+constexpr std::size_t MAX_EVENT_COUNT = 1000000U;
 struct Event {
     std::string id, host, kind, path, observed, coverage;
     std::int64_t epoch = 0;
 };
 struct Rules {
     std::string revision = "baseline-1";
-    int window = 30, min_events = 10, cutoff = 60;
+    int window = 30, lateness_ms = 2000, max_entities = 10000;
+    int min_events = 10, cutoff = 60;
     int rewrite = 40, rename = 30, deletion = 30, extension_types = 8;
 };
 struct Decision {
@@ -60,16 +65,59 @@ std::int64_t parse_time(const std::string &s) {
     return static_cast<std::int64_t>(timegm(&tm));
 }
 
+bool read_limited_line(std::istream &in, std::string &line) {
+    line.clear();
+    char c = '\0';
+    bool consumed = false;
+    while (in.get(c)) {
+        consumed = true;
+        if (c == '\n') return true;
+        if (line.size() == MAX_RECORD_BYTES)
+            throw std::runtime_error("JSON record too large");
+        line.push_back(c);
+    }
+    if (in.bad()) throw std::runtime_error("input read failure");
+    return consumed;
+}
+
+bool valid_utf8(const std::string &text) {
+    const auto *bytes = reinterpret_cast<const unsigned char *>(text.data());
+    for (std::size_t i = 0; i < text.size();) {
+        const unsigned char lead = bytes[i];
+        if (lead <= 0x7fU) { ++i; continue; }
+        std::size_t count = 0;
+        if (lead >= 0xc2U && lead <= 0xdfU) count = 2;
+        else if (lead >= 0xe0U && lead <= 0xefU) count = 3;
+        else if (lead >= 0xf0U && lead <= 0xf4U) count = 4;
+        else return false;
+        if (i + count > text.size()) return false;
+        for (std::size_t j = 1; j < count; ++j)
+            if ((bytes[i + j] & 0xc0U) != 0x80U) return false;
+        if ((lead == 0xe0U && bytes[i + 1U] < 0xa0U) ||
+            (lead == 0xedU && bytes[i + 1U] >= 0xa0U) ||
+            (lead == 0xf0U && bytes[i + 1U] < 0x90U) ||
+            (lead == 0xf4U && bytes[i + 1U] > 0x8fU)) return false;
+        i += count;
+    }
+    return true;
+}
+
 std::vector<Event> load_events(const std::string &file) {
-    std::ifstream in(file);
+    std::ifstream in(file, std::ios::binary);
     if (!in) throw std::runtime_error("cannot open input: " + file);
     std::vector<Event> events;
     std::string line;
     std::size_t line_no = 0;
-    while (std::getline(in, line)) {
+    for (;;) {
+        try {
+            if (!read_limited_line(in, line)) break;
+        } catch (const std::exception &ex) {
+            throw std::runtime_error("line " + std::to_string(line_no + 1U) + ": " + ex.what());
+        }
         ++line_no;
         if (line.empty()) continue;
         try {
+            if (!valid_utf8(line)) throw std::runtime_error("invalid UTF-8");
             Value root = bdetect::json::Parser(line).parse();
             if (required(root, "schema_version").string_or() != "event.v1")
                 throw std::runtime_error("unsupported schema_version");
@@ -86,8 +134,12 @@ std::vector<Event> load_events(const std::string &file) {
                 ? coverage->get("state")->string_or("unknown") : "unknown";
             if (e.id.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
                 throw std::runtime_error("empty required event field");
+            if (e.id.size() > 256U || e.host.size() > 256U || e.kind.size() > 128U ||
+                e.path.size() > 4096U)
+                throw std::runtime_error("event field length limit");
+            if (events.size() == MAX_EVENT_COUNT)
+                throw std::runtime_error("event cardinality limit");
             events.push_back(std::move(e));
-            if (events.size() > 1000000U) throw std::runtime_error("event cardinality limit");
         } catch (const std::exception &ex) {
             throw std::runtime_error("line " + std::to_string(line_no) + ": " + ex.what());
         }
@@ -104,65 +156,146 @@ Rules load_rules(const std::string &path) {
         throw std::runtime_error("rules schema must be rules.v1");
     Rules r;
     if (const Value *p = v.get("revision")) r.revision = p->string_or(r.revision);
-    if (const Value *p = v.get("window_seconds")) r.window = static_cast<int>(p->number_or(r.window));
-    if (const Value *p = v.get("min_event_count")) r.min_events = static_cast<int>(p->number_or(r.min_events));
-    if (const Value *p = v.get("score_cutoff")) r.cutoff = static_cast<int>(p->number_or(r.cutoff));
-    if (const Value *p = v.get("rewrite_threshold")) r.rewrite = static_cast<int>(p->number_or(r.rewrite));
-    if (const Value *p = v.get("rename_threshold")) r.rename = static_cast<int>(p->number_or(r.rename));
-    if (const Value *p = v.get("delete_threshold")) r.deletion = static_cast<int>(p->number_or(r.deletion));
-    if (const Value *p = v.get("extension_types_threshold")) r.extension_types = static_cast<int>(p->number_or(r.extension_types));
-    if (r.window < 1 || r.window > 3600 || r.min_events < 1 || r.min_events > 100000 ||
+    auto integer = [&v](const char *key, int fallback, int low, int high) {
+        const Value *p = v.get(key);
+        if (!p) return fallback;
+        const double *number = std::get_if<double>(&p->data);
+        if (!number || !std::isfinite(*number) || std::floor(*number) != *number ||
+            *number < low || *number > high)
+            throw std::runtime_error(std::string("invalid rule integer: ") + key);
+        return static_cast<int>(*number);
+    };
+    r.window = integer("window_seconds", r.window, 10, 60);
+    if (r.window != 10 && r.window != 30 && r.window != 60)
+        throw std::runtime_error("window_seconds must be 10, 30, or 60");
+    r.lateness_ms = integer("lateness_tolerance_ms", r.lateness_ms, 0, 60000);
+    r.max_entities = integer("max_entities", r.max_entities, 1, 100000);
+    r.min_events = integer("min_event_count", r.min_events, 1, 100000);
+    r.cutoff = integer("score_cutoff", r.cutoff, 1, 1000);
+    r.rewrite = integer("rewrite_threshold", r.rewrite, 1, 100000);
+    r.rename = integer("rename_threshold", r.rename, 1, 100000);
+    r.deletion = integer("delete_threshold", r.deletion, 1, 100000);
+    r.extension_types = integer("extension_types_threshold", r.extension_types, 1, 100000);
+    if (r.min_events < 1 || r.min_events > 100000 ||
         r.cutoff < 1 || r.cutoff > 1000 || r.rewrite < 1 || r.rename < 1 || r.deletion < 1)
         throw std::runtime_error("rules threshold out of range");
     return r;
 }
 
-std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r) {
-    std::map<std::pair<std::string, std::int64_t>, std::vector<const Event *>> windows;
-    for (const auto &e : events) {
-        std::int64_t start = (e.epoch / r.window) * r.window;
-        windows[{e.host, start}].push_back(&e);
+using IntakeIssues = std::map<std::string, std::vector<std::string>>;
+
+void add_issue(IntakeIssues &issues, const std::string &host, const std::string &reason) {
+    auto &items = issues[host];
+    if (std::find(items.begin(), items.end(), reason) == items.end()) items.push_back(reason);
+}
+
+bool same_event(const Event &a, const Event &b) {
+    return a.host == b.host && a.kind == b.kind && a.path == b.path &&
+           a.observed == b.observed && a.coverage == b.coverage;
+}
+
+std::vector<Event> normalize_events(const std::vector<Event> &input, const Rules &r,
+                                    IntakeIssues &issues) {
+    std::map<std::string_view, std::int64_t> latest_by_host;
+    std::map<std::string_view, std::size_t> by_id;
+    std::vector<Event> accepted;
+    std::set<std::string_view> hosts;
+    for (std::size_t event_index = 0; event_index < input.size(); ++event_index) {
+        const Event &event = input[event_index];
+        hosts.insert(event.host);
+        if (hosts.size() > static_cast<std::size_t>(r.max_entities))
+            throw std::runtime_error("entity cardinality limit");
+        auto duplicate = by_id.find(event.id);
+        if (duplicate != by_id.end()) {
+            const Event &first = input[duplicate->second];
+            if (!same_event(first, event)) {
+                add_issue(issues, first.host, "conflicting_duplicate_event_id");
+                add_issue(issues, event.host, "conflicting_duplicate_event_id");
+                if (first.host != event.host) accepted.push_back(event);
+            }
+            continue;
+        }
+        auto latest = latest_by_host.find(event.host);
+        if (latest != latest_by_host.end() && event.epoch < latest->second &&
+            (latest->second - event.epoch) * 1000 > r.lateness_ms) {
+            add_issue(issues, event.host, "late_event_beyond_tolerance");
+            by_id.emplace(event.id, event_index);
+            continue;
+        }
+        if (latest == latest_by_host.end() || event.epoch > latest->second)
+            latest_by_host[event.host] = event.epoch;
+        by_id.emplace(event.id, event_index);
+        accepted.push_back(event);
     }
+    std::stable_sort(accepted.begin(), accepted.end(), [](const Event &a, const Event &b) {
+        if (a.host != b.host) return a.host < b.host;
+        if (a.epoch != b.epoch) return a.epoch < b.epoch;
+        return a.id < b.id;
+    });
+    return accepted;
+}
+
+std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
+                               const IntakeIssues &issues) {
+    std::map<std::string, std::vector<const Event *>> by_host;
+    for (const auto &e : events) by_host[e.host].push_back(&e);
     std::vector<Decision> out;
-    for (const auto &[key, items] : windows) {
-        Decision d;
-        d.host = key.first;
-        d.start = std::to_string(key.second);
-        d.end = std::to_string(key.second + r.window);
-        d.id = "decision-" + std::to_string(out.size() + 1U) + "-" + d.host;
-        std::set<std::string> modified, renamed, deleted, extensions, ids;
-        bool degraded = false;
-        for (const Event *e : items) {
-            ids.insert(e->id);
-            if (e->coverage == "degraded" || e->coverage == "unsupported") degraded = true;
-            if (e->kind == "file.modified") modified.insert(e->path);
-            if (e->kind == "file.renamed" || e->kind == "file.moved_to") renamed.insert(e->path);
-            if (e->kind == "file.deleted") deleted.insert(e->path);
-            std::size_t slash = e->path.find_last_of('/');
-            std::size_t dot = e->path.find_last_of('.');
-            if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
-                extensions.insert(e->path.substr(dot));
+    for (const auto &[host, host_events] : by_host) {
+        std::size_t left = 0;
+        std::set<std::int64_t> endpoints;
+        for (const Event *event : host_events) endpoints.insert(event->epoch);
+        for (std::int64_t end : endpoints) {
+            const std::int64_t start = end - r.window;
+            while (left < host_events.size() && host_events[left]->epoch < start) ++left;
+            std::size_t right = left;
+            while (right < host_events.size() && host_events[right]->epoch <= end) ++right;
+            const std::size_t count = right - left;
+            Decision d;
+            d.host = host;
+            d.start = std::to_string(start);
+            d.end = std::to_string(end);
+            d.id = "decision-" + std::to_string(out.size() + 1U) + "-" + d.host;
+            std::set<std::string> modified, renamed, deleted, extensions, ids;
+            bool degraded = false;
+            for (std::size_t i = left; i < right; ++i) {
+                const Event *e = host_events[i];
+                ids.insert(e->id);
+                if (e->coverage != "healthy" && e->coverage != "observed") degraded = true;
+                if (e->kind == "file.modified") modified.insert(e->path);
+                if (e->kind == "path.renamed" || e->kind == "file.renamed" || e->kind == "file.moved_to") renamed.insert(e->path);
+                if (e->kind == "file.deleted") deleted.insert(e->path);
+                std::size_t slash = e->path.find_last_of('/');
+                std::size_t dot = e->path.find_last_of('.');
+                if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+                    extensions.insert(e->path.substr(dot));
+            }
+            d.event_ids.assign(ids.begin(), ids.end());
+            auto host_issue = issues.find(host);
+            if (host_issue != issues.end()) d.unknown = host_issue->second;
+            const bool intake_degraded = host_issue != issues.end() && !host_issue->second.empty();
+            if (degraded && std::find(d.unknown.begin(), d.unknown.end(), "coverage_degraded") == d.unknown.end())
+                d.unknown.push_back("coverage_degraded");
+            if (degraded || intake_degraded) {
+                d.label = "unknown";
+            } else if (count < static_cast<std::size_t>(r.min_events)) {
+                d.label = "unknown"; d.unknown.push_back("insufficient_events");
+            } else {
+                if (modified.size() >= static_cast<std::size_t>(r.rewrite)) {
+                    d.score += 60; d.reasons.push_back("R-MASS-REWRITE");
+                }
+                if (renamed.size() >= static_cast<std::size_t>(r.rename)) {
+                    d.score += 60; d.reasons.push_back("R-MASS-RENAME");
+                }
+                if (deleted.size() >= static_cast<std::size_t>(r.deletion)) {
+                    d.score += 60; d.reasons.push_back("R-MASS-DELETE");
+                }
+                if (extensions.size() >= static_cast<std::size_t>(r.extension_types)) {
+                    d.score += 20; d.reasons.push_back("R-EXTENSION-DIVERSITY");
+                }
+                d.label = d.score >= r.cutoff ? "suspicious" : "benign";
+            }
+            out.push_back(std::move(d));
         }
-        d.event_ids.assign(ids.begin(), ids.end());
-        if (degraded) { d.label = "unknown"; d.unknown.push_back("coverage_degraded"); }
-        else if (items.size() < static_cast<std::size_t>(r.min_events)) {
-            d.label = "unknown"; d.unknown.push_back("insufficient_events");
-        } else {
-            if (modified.size() >= static_cast<std::size_t>(r.rewrite)) {
-                d.score += 60; d.reasons.push_back("R-MASS-REWRITE");
-            }
-            if (renamed.size() >= static_cast<std::size_t>(r.rename)) {
-                d.score += 60; d.reasons.push_back("R-MASS-RENAME");
-            }
-            if (deleted.size() >= static_cast<std::size_t>(r.deletion)) {
-                d.score += 60; d.reasons.push_back("R-MASS-DELETE");
-            }
-            if (extensions.size() >= static_cast<std::size_t>(r.extension_types)) {
-                d.score += 20; d.reasons.push_back("R-EXTENSION-DIVERSITY");
-            }
-            d.label = d.score >= r.cutoff ? "suspicious" : "benign";
-        }
-        out.push_back(std::move(d));
     }
     return out;
 }
@@ -171,13 +304,14 @@ void write_decisions(const std::string &path, const std::vector<Decision> &ds, c
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot open output");
     for (const auto &d : ds) {
+        const bool degraded = std::any_of(d.unknown.begin(), d.unknown.end(),
+            [](const std::string &reason) { return reason != "insufficient_events"; });
         out << "{\"schema_version\":\"decision.v1\",\"decision_id\":\"" << escape(d.id)
             << "\",\"ruleset_revision\":\"" << escape(r.revision) << "\",\"entity_key\":\""
             << escape(d.host) << "\",\"window_start\":\"" << d.start << "\",\"window_end\":\""
             << d.end << "\",\"score\":" << d.score << ",\"decision\":\"" << d.label
             << "\",\"simulation_only\":true,\"coverage\":\""
-            << (std::find(d.unknown.begin(), d.unknown.end(), "coverage_degraded") != d.unknown.end()
-                ? "degraded" : "observed") << "\",\"source_event_ids\":[";
+            << (degraded ? "degraded" : "observed") << "\",\"source_event_ids\":[";
         for (std::size_t i = 0; i < d.event_ids.size(); ++i) {
             if (i) out << ',';
             out << '"' << escape(d.event_ids[i]) << '"';
@@ -303,9 +437,11 @@ int main(int argc, char **argv) {
         } else if (command == "generate-fixtures") {
             generate_fixtures(arg(argc, argv, "--out"), arg(argc, argv, "--root"));
         } else if (command == "replay") {
-            auto events = load_events(arg(argc, argv, "--input"));
             Rules rules = load_rules(arg(argc, argv, "--rules"));
-            auto decisions = evaluate(events, rules);
+            auto input_events = load_events(arg(argc, argv, "--input"));
+            IntakeIssues issues;
+            auto events = normalize_events(input_events, rules, issues);
+            auto decisions = evaluate(events, rules, issues);
             write_decisions(arg(argc, argv, "--out"), decisions, rules);
             std::cout << "decisions=" << decisions.size() << " simulation_only=true\n";
         } else if (command == "evaluate") {
