@@ -18,7 +18,7 @@ Status: the local Release, Clang, sanitizer, and selected synthetic verification
 - `clang++ --analyze -std=c++20 -Wall -Wextra -Wpedantic -Werror -Iinclude src/bdetect.cpp`: passed with no diagnostics.
 - `git diff --check`: passed.
 
-The focused tests cover 10/30/60-second configured windows, a 10-second boundary, in-tolerance reorder, exact duplicate removal and raw-payload conflicts, late events, all five supported rule operators, configured weight contributions and per-rule source IDs, per-rule minimum samples, degraded coverage, invalid rule operator/window, entity and record bounds, required event fields, duplicate JSON keys, invalid JSON number grammar, invalid UTF-8, valid and invalid Unicode surrogate pairs, RFC 3339 UTC/offset/fraction/leap-day parsing, invalid calendar/missing timezone, exact SHA-256 values, paced/unpaced byte equality, and a one-hour paced-duration guard. Metric tests validate labels/predictions, mismatched and duplicate entities, per-rate numerators/denominators, zero denominators, `N/A`, and decision records larger than 1 MiB.
+The focused tests cover 10/30/60-second configured windows, a 10-second boundary, in-tolerance event-time reorder, numeric producer sequence ordering despite timestamp reorder, sequence gaps, session reset, conflicting sequence claims, mixed sequence metadata, invalid or incomplete sequence pairs, exact duplicate removal and raw-payload conflicts, late events, all five supported rule operators, configured weight contributions and per-rule source IDs, per-rule minimum samples, degraded coverage, invalid rule operator/window, entity and record bounds, required event fields, duplicate JSON keys, invalid JSON number grammar, invalid UTF-8, valid and invalid Unicode surrogate pairs, RFC 3339 UTC/offset/fraction/leap-day parsing, invalid calendar/missing timezone, exact SHA-256 values, paced/unpaced byte equality, and a one-hour paced-duration guard. Metric tests validate labels/predictions, mismatched and duplicate entities, per-rate numerators/denominators, zero denominators, `N/A`, and decision records larger than 1 MiB.
 
 All three JSON Schema Draft 2020-12 files passed `Draft202012Validator.check_schema`. The baseline rules, 296 generated event records, and 12 generated decisions validated against their corresponding schemas.
 
@@ -31,7 +31,7 @@ One run replayed 100,000 synthetic records (35,300,000 input bytes) on this host
 ## Remaining verification gaps
 
 - Negative schema-conformance cases and parser fuzzing are not complete; generated records and decisions passed the published schemas.
-- Missing-record detection remains unavailable when upstream events have no producer sequence/session metadata.
+- Missing-record detection remains unavailable when upstream events have no producer sequence/session metadata. Sequence audit runs only after full batch load and applies unknown status at host scope; an online lateness watermark and window-scoped gap attribution are not implemented.
 - Exact 30- and 60-second boundary cases are not yet covered; only window lengths are checked for those settings.
 - No independently collected or representative benign/security dataset has been evaluated. No frozen, independently held-out dataset, signed manifest, or test-data modification ledger exists yet.
 - The rule hash and per-run dataset hash are emitted, but trust/authentication of those hashes is not established.

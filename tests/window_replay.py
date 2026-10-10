@@ -60,6 +60,36 @@ rows = [
     event("timestamp-utc", "timestamp-utc", "2026-10-09T12:00:05Z", "/lab/utc.dat"),
     event("timestamp-offset", "timestamp-offset", "2026-10-09T21:00:05.250+09:00", "/lab/offset.dat"),
     event("escaped\tid", "escaped\thost", "2026-10-09T12:00:05Z", "/lab/escaped.dat"),
+    # Sequence order is independent from event-time ordering and input arrival.
+    dict(event("seq-order-1", "seq-order", "2026-10-09T12:00:05Z", "/lab/s1.dat"),
+         producer_session_id="boot-order", producer_sequence=1),
+    dict(event("seq-order-3", "seq-order", "2026-10-09T12:00:06Z", "/lab/s3.dat"),
+         producer_session_id="boot-order", producer_sequence=3),
+    dict(event("seq-order-2", "seq-order", "2026-10-09T12:00:04Z", "/lab/s2.dat"),
+         producer_session_id="boot-order", producer_sequence=2),
+    dict(event("seq-gap-10", "seq-gap", "2026-10-09T12:00:03Z", "/lab/g10.dat"),
+         producer_session_id="boot-gap", producer_sequence=10),
+    dict(event("seq-gap-11", "seq-gap", "2026-10-09T12:00:04Z", "/lab/g11.dat"),
+         producer_session_id="boot-gap", producer_sequence=11),
+    dict(event("seq-gap-13", "seq-gap", "2026-10-09T12:00:05Z", "/lab/g13.dat"),
+         producer_session_id="boot-gap", producer_sequence=13),
+    dict(event("seq-restart-a", "seq-restart", "2026-10-09T12:00:03Z", "/lab/r1.dat"),
+         producer_session_id="boot-old", producer_sequence=40),
+    dict(event("seq-restart-b", "seq-restart", "2026-10-09T12:00:04Z", "/lab/r2.dat"),
+         producer_session_id="boot-old", producer_sequence=41),
+    dict(event("seq-restart-c", "seq-restart", "2026-10-09T12:00:05Z", "/lab/r3.dat"),
+         producer_session_id="boot-new", producer_sequence=1),
+    dict(event("seq-mixed-1", "seq-mixed", "2026-10-09T12:00:03Z", "/lab/m1.dat"),
+         producer_session_id="boot-mixed", producer_sequence=1),
+    event("seq-mixed-2", "seq-mixed", "2026-10-09T12:00:04Z", "/lab/m2.dat"),
+    dict(event("seq-mixed-3", "seq-mixed", "2026-10-09T12:00:05Z", "/lab/m3.dat"),
+         producer_session_id="boot-mixed", producer_sequence=2),
+    dict(event("seq-conflict-a", "seq-conflict", "2026-10-09T12:00:03Z", "/lab/c1.dat"),
+         producer_session_id="boot-conflict", producer_sequence=5),
+    dict(event("seq-conflict-b", "seq-conflict", "2026-10-09T12:00:04Z", "/lab/c2.dat"),
+         producer_session_id="boot-conflict", producer_sequence=5),
+    dict(event("seq-conflict-c", "seq-conflict", "2026-10-09T12:00:05Z", "/lab/c3.dat"),
+         producer_session_id="boot-conflict", producer_sequence=6),
 ]
 input_path = work / "window-input.ndjson"
 input_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
@@ -171,6 +201,24 @@ assert "coverage_degraded" in degraded["unknown_fields"]
 assert by_host["timestamp-utc"][0]["window_end"] == by_host["timestamp-offset"][0]["window_end"]
 assert by_host["escaped\thost"][0]["source_event_ids"] == ["escaped\tid"]
 
+sequence_order = by_host["seq-order"][-1]
+assert sequence_order["decision"] == "suspicious", sequence_order
+assert "producer_sequence_gap" not in sequence_order["unknown_fields"], sequence_order
+assert sequence_order["coverage"] == "observed", sequence_order
+sequence_gap = by_host["seq-gap"][-1]
+assert sequence_gap["decision"] == "unknown" and sequence_gap["coverage"] == "degraded", sequence_gap
+assert "producer_sequence_gap" in sequence_gap["unknown_fields"], sequence_gap
+sequence_restart = by_host["seq-restart"][-1]
+assert "producer_sequence_gap" not in sequence_restart["unknown_fields"], sequence_restart
+assert "producer_sequence_metadata_incomplete" not in sequence_restart["unknown_fields"], sequence_restart
+sequence_mixed = by_host["seq-mixed"][-1]
+assert sequence_mixed["decision"] == "unknown" and sequence_mixed["coverage"] == "degraded", sequence_mixed
+assert "producer_sequence_metadata_incomplete" in sequence_mixed["unknown_fields"], sequence_mixed
+sequence_conflict = by_host["seq-conflict"][-1]
+assert "producer_sequence_conflict" in sequence_conflict["unknown_fields"], sequence_conflict
+assert "producer_sequence_gap" not in sequence_conflict["unknown_fields"], sequence_conflict
+assert not any("producer_sequence" in reason for reason in by_host["ordered"][-1]["unknown_fields"])
+
 for duration in (10, 30, 60):
     candidate_rules = dict(rules, window_seconds=duration)
     candidate_path = work / f"window-rules-{duration}.json"
@@ -243,6 +291,26 @@ missing_event_field = subprocess.run([
     str(binary), "validate-events", "--input", str(missing_event_field_path),
 ], capture_output=True, text=True)
 assert missing_event_field.returncode != 0 and "line 1" in missing_event_field.stderr
+
+sequence_pair_path = work / "incomplete-producer-sequence.ndjson"
+sequence_pair = event("sequence-pair", "sequence-pair", "2026-10-09T12:00:05Z", "/lab/sequence.dat")
+sequence_pair["producer_session_id"] = "boot-pair"
+sequence_pair_path.write_text(json.dumps(sequence_pair) + "\n", encoding="utf-8")
+sequence_pair_result = subprocess.run([
+    str(binary), "validate-events", "--input", str(sequence_pair_path),
+], capture_output=True, text=True)
+assert sequence_pair_result.returncode != 0 and "must appear together" in sequence_pair_result.stderr
+
+for invalid_sequence in (0, 1.5, 9007199254740992):
+    bad_sequence = event(f"bad-sequence-{invalid_sequence}", "bad-sequence",
+                         "2026-10-09T12:00:05Z", "/lab/sequence.dat")
+    bad_sequence.update({"producer_session_id": "boot-bad", "producer_sequence": invalid_sequence})
+    bad_sequence_path = work / f"bad-sequence-{invalid_sequence}.ndjson"
+    bad_sequence_path.write_text(json.dumps(bad_sequence) + "\n", encoding="utf-8")
+    bad_sequence_result = subprocess.run([
+        str(binary), "validate-events", "--input", str(bad_sequence_path),
+    ], capture_output=True, text=True)
+    assert bad_sequence_result.returncode != 0 and "producer_sequence" in bad_sequence_result.stderr
 
 numeric_event = event("numeric", "numeric", "2026-10-09T12:00:05Z", "/lab/numeric.dat")
 numeric_event["target"]["device"] = 1

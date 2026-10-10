@@ -7,6 +7,8 @@
     "schema_version": {"const": "event.v1"},
     "event_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "source": {"type": "string", "minLength": 1, "maxLength": 128},
+    "producer_session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "producer_sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
     "host_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "observed_at": {"type": "string", "format": "date-time"},
     "kind": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -41,6 +43,10 @@
       },
       "additionalProperties": true
     }
+  },
+  "dependentRequired": {
+    "producer_session_id": ["producer_sequence"],
+    "producer_sequence": ["producer_session_id"]
   },
   "additionalProperties": true
 }

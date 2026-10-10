@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 #include <openssl/evp.h>
 #include <sys/stat.h>
@@ -27,7 +28,10 @@ constexpr std::size_t MAX_RECORD_BYTES = 1024U * 1024U;
 constexpr std::size_t MAX_DECISION_RECORD_BYTES = 64U * 1024U * 1024U;
 constexpr std::size_t MAX_EVENT_COUNT = 1000000U;
 struct Event {
-    std::string id, host, kind, path, observed, coverage, content_hash;
+    std::string id, source, host, kind, path, observed, coverage, content_hash;
+    std::string producer_session_id;
+    std::uint64_t producer_sequence = 0;
+    bool has_producer_sequence = false;
     std::int64_t epoch = 0;
 };
 struct Rule {
@@ -271,8 +275,24 @@ std::vector<Event> load_events(const std::string &file) {
                 throw std::runtime_error("unsupported schema_version");
             Event e;
             e.id = required_text(root, "event_id");
-            const std::string source = required_text(root, "source");
+            e.source = required_text(root, "source");
             e.host = required_text(root, "host_id");
+            const Value *producer_session = root.get("producer_session_id");
+            const Value *producer_sequence = root.get("producer_sequence");
+            if ((producer_session == nullptr) != (producer_sequence == nullptr))
+                throw std::runtime_error("producer_session_id and producer_sequence must appear together");
+            if (producer_session) {
+                const auto *session = std::get_if<std::string>(&producer_session->data);
+                const double *sequence = std::get_if<double>(&producer_sequence->data);
+                if (!session || session->empty() || session->size() > 128U)
+                    throw std::runtime_error("producer_session_id must be a nonempty string of at most 128 bytes");
+                if (!sequence || !std::isfinite(*sequence) || std::floor(*sequence) != *sequence ||
+                    *sequence < 1.0 || *sequence > 9007199254740991.0)
+                    throw std::runtime_error("producer_sequence must be an exact positive safe integer");
+                e.producer_session_id = *session;
+                e.producer_sequence = static_cast<std::uint64_t>(*sequence);
+                e.has_producer_sequence = true;
+            }
             e.kind = required_text(root, "kind");
             const std::string severity = required_text(root, "severity");
             e.observed = required_text(root, "observed_at");
@@ -304,9 +324,9 @@ std::vector<Event> load_events(const std::string &file) {
             const std::set<std::string> severities = {"info", "low", "medium", "high", "critical"};
             if (severity.empty() || !severities.contains(severity))
                 throw std::runtime_error("invalid event severity");
-            if (e.id.empty() || source.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
+            if (e.id.empty() || e.source.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
                 throw std::runtime_error("empty required event field");
-            if (e.id.size() > 256U || source.size() > 128U || e.host.size() > 256U ||
+            if (e.id.size() > 256U || e.source.size() > 128U || e.host.size() > 256U ||
                 e.kind.size() > 128U || e.path.size() > 4096U)
                 throw std::runtime_error("event field length limit");
             if (events.size() == MAX_EVENT_COUNT)
@@ -408,6 +428,7 @@ std::vector<Event> normalize_events(const std::vector<Event> &input, const Rules
     std::map<std::string_view, std::int64_t> latest_by_host;
     std::map<std::string_view, std::size_t> by_id;
     std::vector<Event> accepted;
+    std::vector<const Event *> unique_events;
     std::set<std::string_view> hosts;
     for (std::size_t event_index = 0; event_index < input.size(); ++event_index) {
         const Event &event = input[event_index];
@@ -420,10 +441,14 @@ std::vector<Event> normalize_events(const std::vector<Event> &input, const Rules
             if (!same_event(first, event)) {
                 add_issue(issues, first.host, "conflicting_duplicate_event_id");
                 add_issue(issues, event.host, "conflicting_duplicate_event_id");
-                if (first.host != event.host) accepted.push_back(event);
+                if (first.host != event.host) {
+                    accepted.push_back(event);
+                    unique_events.push_back(&event);
+                }
             }
             continue;
         }
+        unique_events.push_back(&event);
         auto latest = latest_by_host.find(event.host);
         if (latest != latest_by_host.end() && event.epoch < latest->second &&
             (latest->second - event.epoch) * 1000 > r.lateness_ms) {
@@ -435,6 +460,39 @@ std::vector<Event> normalize_events(const std::vector<Event> &input, const Rules
             latest_by_host[event.host] = event.epoch;
         by_id.emplace(event.id, event_index);
         accepted.push_back(event);
+    }
+    using SourceKey = std::pair<std::string, std::string>;
+    using ProducerKey = std::tuple<std::string, std::string, std::string>;
+    std::map<SourceKey, std::pair<bool, bool>> source_sequence_presence;
+    std::map<ProducerKey, std::vector<std::pair<std::uint64_t, std::string>>> producer_sequences;
+    for (const Event *event : unique_events) {
+        auto &presence = source_sequence_presence[{event->host, event->source}];
+        if (event->has_producer_sequence) {
+            presence.first = true;
+            producer_sequences[{event->host, event->source, event->producer_session_id}]
+                .emplace_back(event->producer_sequence, event->id);
+        } else {
+            presence.second = true;
+        }
+    }
+    for (const auto &[source, presence] : source_sequence_presence) {
+        if (presence.first && presence.second)
+            add_issue(issues, source.first, "producer_sequence_metadata_incomplete");
+    }
+    for (auto &[producer, sequences] : producer_sequences) {
+        std::sort(sequences.begin(), sequences.end(), [](const auto &a, const auto &b) {
+            if (a.first != b.first) return a.first < b.first;
+            return a.second < b.second;
+        });
+        for (std::size_t i = 1; i < sequences.size(); ++i) {
+            if (sequences[i - 1U].first == sequences[i].first &&
+                sequences[i - 1U].second != sequences[i].second) {
+                add_issue(issues, std::get<0>(producer), "producer_sequence_conflict");
+            } else if (sequences[i - 1U].first < 9007199254740991ULL &&
+                       sequences[i].first > sequences[i - 1U].first + 1ULL) {
+                add_issue(issues, std::get<0>(producer), "producer_sequence_gap");
+            }
+        }
     }
     std::stable_sort(accepted.begin(), accepted.end(), [](const Event &a, const Event &b) {
         if (a.host != b.host) return a.host < b.host;

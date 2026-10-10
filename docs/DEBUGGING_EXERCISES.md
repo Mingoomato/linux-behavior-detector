@@ -2,17 +2,17 @@
 
 These three exercises are intentionally unsolved. The repository contains no answer key or complete patch. Work only with synthetic records; do not run malware or process personal telemetry. Completing an exercise is separate from automated repository verification.
 
-## Exercise 1 — Prove a missing source event
+## Exercise 1 — Test exact sliding-window boundaries
 
-**Goal:** Extend provenance so a dropped source record can be detected only when a producer supports sequencing.
+**Goal:** Add focused tests for the left and right edges of 30-second and 60-second windows.
 
-**Starting points:** `Event`, `load_events`, `normalize_events`, the event.v1 contract, and `docs/TEST_PLAN.md`.
+**Starting points:** `evaluate`, `tests/window_replay.py`, `docs/TEST_PLAN.md`, and the configured `window_seconds` field.
 
-Define an optional per-source sequence field and reset/session semantics. Add synthetic continuous, gapped, restarted, and duplicated sequences. Mark only the affected host/source interval unknown when a gap is provable. A source without sequence metadata must remain “not observable.”
+Construct synthetic events exactly on `end - window_seconds`, one second before it, and exactly on the right endpoint. Assert event IDs, features, and labels for each endpoint; include multiple overlapping endpoints so the left index is exercised as it advances.
 
-**Constraints:** Preserve the record/event limits; do not treat a sequence as globally unique across hosts or producer sessions; do not infer an actor; do not downgrade degraded evidence to benign.
+**Constraints:** Preserve the current inclusive interval `[end - window_seconds, end]`, one-second event-time precision, deterministic output, and synthetic-only data. Do not change the SRS or quietly alter the interval convention to make a test pass.
 
-**Acceptance:** Tests distinguish a proven gap, a producer restart, a duplicate, and unavailable sequence metadata. Identical input and rules produce identical affected intervals.
+**Acceptance:** Tests prove both exact-edge inclusion and just-outside exclusion for 30 and 60 seconds, then pass in Release and sanitizer builds.
 
 ## Exercise 2 — Fuzz the JSON and timestamp boundary
 

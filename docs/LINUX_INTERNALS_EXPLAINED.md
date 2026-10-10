@@ -26,7 +26,7 @@ If a separate collector supplies events, Linux inotify delivers filesystem notif
 
 ## Concurrency and failure behavior
 
-This program is single-threaded. There is no worker queue, lock, atomic state, or backpressure mechanism. Input parsing fails on malformed or oversized 1 MiB records, unsupported schema, invalid required fields, or event limits. Rule validation fails before scoring on unsupported features/operators or invalid bounds. Decision JSONL can carry up to 64 MiB of event evidence; larger decisions are rejected before serialization. Late/conflicting events and non-healthy coverage produce unknown. Large allowed corpora still retain both source and normalized vectors, so the cap does not guarantee a small memory footprint. Output is not atomically replaced.
+This program is single-threaded. There is no worker queue, lock, atomic state, or backpressure mechanism. Input parsing fails on malformed or oversized 1 MiB records, unsupported schema, invalid required fields, incomplete sequence metadata pairs, invalid sequence numbers, or event limits. Rule validation fails before scoring on unsupported features/operators or invalid bounds. Decision JSONL can carry up to 64 MiB of event evidence; larger decisions are rejected before serialization. Late/conflicting events, sequence gaps/collisions, mixed sequenced/unsequenced source records, and non-healthy coverage produce unknown. Sequence gaps are checked after the entire input batch is read; this is not a `timerfd`, `epoll`, or online watermark implementation. Large allowed corpora still retain both source and normalized vectors, so the cap does not guarantee a small memory footprint. Output is not atomically replaced.
 
 ## Official references
 

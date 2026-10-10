@@ -21,7 +21,7 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 12. How can a test prove that configured rule weights affect both score and explanation rather than only output metadata?
 13. What exact bytes do `ruleset_sha256` and `dataset_sha256` cover? What does the before/after input hash check detect, and what does it not detect?
 14. What conditions lead to `unknown`, and could any currently produce a misleading `coverage=observed` value?
-15. How would you add producer sequence-gap detection without marking sources that lack sequence metadata as degraded?
+15. Why must `producer_session_id` and `producer_sequence` appear as a pair, and why is the gap key `(host, source, session)` rather than just `host`?
 16. How would you test 10-, 30-, and 60-second boundary cases, including an event exactly at the left edge?
 17. What happens on an oversized line, a line with invalid UTF-8, an invalid rule operator, or a missing output directory?
 18. Why can one million accepted records still exceed a practical memory budget? Which structures duplicate or retain the data?
@@ -43,5 +43,9 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 28. When could inotify, fanotify, or eBPF be a useful upstream source, and what coverage, privilege, or attribution limits would remain?
 29. Which change would most reduce uncertainty before claiming research value: timestamp validation, source sequence gaps, parser fuzzing, independent data, or 100k resource measurement? Defend your ordering.
 30. What alternative rule or statistical model could represent interactions between features, and what data and calibration evidence would it require?
+31. Why does the sequence audit sort numeric sequence values instead of event timestamps, and what assumptions does that make about a producer?
+32. What should happen when two different event IDs claim one sequence number? How would an exact retransmission with one event ID differ?
+33. Which decisions become `unknown` after a batch-level sequence gap is found? How would an interval-scoped online watermark change the design and its resource lifetimes?
+34. Why does mixing sequenced and unsequenced records for the same host/source degrade coverage, while a source that is wholly unsequenced remains under the legacy behavior?
 
 Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.
