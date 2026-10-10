@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import hashlib
+import datetime
 import pathlib
 import subprocess
 import sys
@@ -231,6 +232,47 @@ for duration in (10, 30, 60):
     candidate_rows = [json.loads(line) for line in candidate_out.read_text(encoding="utf-8").splitlines()]
     latest_ordered = [row for row in candidate_rows if row["entity_key"] == "ordered"][-1]
     assert int(latest_ordered["window_end"]) - int(latest_ordered["window_start"]) == duration
+
+for duration in (30, 60):
+    end = datetime.datetime(2026, 10, 9, 12, 1, 0, tzinfo=datetime.timezone.utc)
+    to_timestamp = lambda value: value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    boundary_host = f"boundary-{duration}"
+    boundary_rows = [
+        event(f"{boundary_host}-before-left", boundary_host,
+              to_timestamp(end - datetime.timedelta(seconds=duration + 1)), "/lab/before-left.dat"),
+        event(f"{boundary_host}-left", boundary_host,
+              to_timestamp(end - datetime.timedelta(seconds=duration)), "/lab/left.dat"),
+        event(f"{boundary_host}-before-right", boundary_host,
+              to_timestamp(end - datetime.timedelta(seconds=1)), "/lab/before-right.dat"),
+        event(f"{boundary_host}-right", boundary_host, to_timestamp(end), "/lab/right.dat"),
+    ]
+    boundary_input = work / f"boundary-{duration}-input.ndjson"
+    boundary_input.write_text("".join(json.dumps(row) + "\n" for row in boundary_rows), encoding="utf-8")
+    boundary_rules = json.loads(json.dumps(rules))
+    boundary_rules.update({"window_seconds": duration, "min_event_count": 3, "score_cutoff": 3})
+    boundary_rules["rules"] = [{
+        "id": "T-BOUNDARY", "feature": "event_count", "operator": ">=",
+        "threshold": 3, "weight": 3, "min_sample_count": 3,
+    }]
+    boundary_rules_path = work / f"boundary-{duration}-rules.json"
+    boundary_rules_path.write_text(json.dumps(boundary_rules), encoding="utf-8")
+    boundary_output = work / f"boundary-{duration}-output.ndjson"
+    subprocess.run([
+        str(binary), "replay", "--input", str(boundary_input),
+        "--rules", str(boundary_rules_path), "--out", str(boundary_output),
+    ], check=True, capture_output=True, text=True)
+    boundary_decisions = [json.loads(line) for line in boundary_output.read_text(encoding="utf-8").splitlines()]
+    boundary_by_end = {int(row["window_end"]): row for row in boundary_decisions}
+    right_epoch = int(end.timestamp())
+    previous = boundary_by_end[right_epoch - 1]
+    latest_boundary = boundary_by_end[right_epoch]
+    assert set(previous["source_event_ids"]) == {
+        f"{boundary_host}-before-left", f"{boundary_host}-left", f"{boundary_host}-before-right",
+    }, previous
+    assert set(latest_boundary["source_event_ids"]) == {
+        f"{boundary_host}-left", f"{boundary_host}-before-right", f"{boundary_host}-right",
+    }, latest_boundary
+    assert previous["decision"] == "suspicious" and latest_boundary["decision"] == "suspicious"
 
 invalid_rules = dict(rules, window_seconds=15)
 invalid_path = work / "window-rules-invalid.json"

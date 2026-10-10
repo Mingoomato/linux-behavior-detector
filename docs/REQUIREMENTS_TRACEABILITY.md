@@ -8,7 +8,7 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 | BHD-FR-002 | host-level grouping; actor ignored | `tests/window_replay.py` supplies an untrusted PID with unknown attribution and asserts no actor is emitted | IMPLEMENTED |
 | BHD-FR-003 | `pace_replay`, `std::chrono::steady_clock`, event-time windows | `tests/window_replay.py` checks paced/unpaced byte-equivalence; this remains an offline batch replayer | IMPLEMENTED |
 | BHD-FR-004 | `normalize_events` exact-ID dedupe, bounded lateness, stable reorder, optional producer session/sequence validation | `tests/window_replay.py` covers in-tolerance event-time reorder, numeric sequence ordering, a gap, producer restart, sequence collision, mixed metadata, and missing-pair rejection; whole-corpus batch finalization only | IMPLEMENTED_BATCH_SCOPE |
-| BHD-FR-005 | `evaluate` overlapping 10/30/60-second event-time windows | `tests/window_replay.py` covers 10-second edge | IMPLEMENTED |
+| BHD-FR-005 | `evaluate` overlapping 10/30/60-second event-time windows | `tests/window_replay.py` checks exact left-edge inclusion, one-second-outside exclusion, right-edge inclusion, and left-index advancement for 10/30/60-second windows | IMPLEMENTED |
 | BHD-FR-006 | configured rules in `rules/baseline.json`, `evaluate` | generated rewrite/rename/delete/mixed fixtures; configurable explainable scoring | IN_PROGRESS |
 | BHD-FR-007 | `Rule`, `load_rules` | `tests/window_replay.py` checks all five operators, configured weights/thresholds, per-rule samples, and invalid operator/window | IMPLEMENTED |
 | BHD-FR-008 | `evaluate` unknown/labels | BHD-T-009 pending | IMPLEMENTED |

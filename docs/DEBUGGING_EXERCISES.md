@@ -2,17 +2,17 @@
 
 These three exercises are intentionally unsolved. The repository contains no answer key or complete patch. Work only with synthetic records; do not run malware or process personal telemetry. Completing an exercise is separate from automated repository verification.
 
-## Exercise 1 — Test exact sliding-window boundaries
+## Exercise 1 — Make decision output crash-safe
 
-**Goal:** Add focused tests for the left and right edges of 30-second and 60-second windows.
+**Goal:** Prevent an interrupted or failed `write_decisions` run from leaving a truncated file that looks like a complete result.
 
-**Starting points:** `evaluate`, `tests/window_replay.py`, `docs/TEST_PLAN.md`, and the configured `window_seconds` field.
+**Starting points:** `write_decisions`, `main`, `docs/THREAT_MODEL.md`, and the decision output contract.
 
-Construct synthetic events exactly on `end - window_seconds`, one second before it, and exactly on the right endpoint. Assert event IDs, features, and labels for each endpoint; include multiple overlapping endpoints so the left index is exercised as it advances.
+Design a temporary-file protocol in the destination directory, define when the old file is retained, and add synthetic tests for serialization failure and replacement failure. Consider concurrent readers and an already existing destination.
 
-**Constraints:** Preserve the current inclusive interval `[end - window_seconds, end]`, one-second event-time precision, deterministic output, and synthetic-only data. Do not change the SRS or quietly alter the interval convention to make a test pass.
+**Constraints:** Preserve deterministic bytes and existing file permissions deliberately; do not follow a symlink outside the intended output path; do not claim power-loss durability unless file and directory synchronization are handled and tested. Keep the output schema unchanged.
 
-**Acceptance:** Tests prove both exact-edge inclusion and just-outside exclusion for 30 and 60 seconds, then pass in Release and sanitizer builds.
+**Acceptance:** A failed write leaves the previous complete result intact (or no result if none existed), successful replacement yields a complete valid JSONL file, and tests pass under sanitizers.
 
 ## Exercise 2 — Fuzz the JSON and timestamp boundary
 
