@@ -37,7 +37,7 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 
 ## Design tradeoffs
 
-25. Compare the current whole-corpus batch normalizer with a bounded streaming watermark and queue. What late-event contract would streaming require?
+25. Compare the whole-corpus batch normalizer with strict-order `replay --stream`. What capabilities does the stream mode reject, and what would a bounded-disorder watermark require?
 26. Compare fast offline replay, a paced monotonic timeline, and a fully virtual clock. Which should be used for deterministic tests and why?
 27. What would a frozen development/holdout manifest need to record to avoid tuning leakage? Where would the rule hash fit?
 28. When could inotify, fanotify, or eBPF be a useful upstream source, and what coverage, privilege, or attribution limits would remain?
@@ -64,5 +64,11 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 49. Explain how `O_CREAT|O_EXCL|O_NOFOLLOW` protects manifest creation. Which parent-directory or administrator actions remain outside that guarantee?
 50. How does `dataset-audit` ensure a changed hash is recorded before it returns failure? What do `flock`, `O_APPEND`, and `fdatasync` each contribute, and which one is advisory?
 51. Why is the audit ledger owner-only and size-bounded? How could the owner still alter its history, and how would a signed or remote ledger change that threat model?
+52. Trace a `--stream` record from the 64 KiB read buffer through `parse_event_line`, the timestamp queue, active-window admission, scoring, and final serialization.
+53. Why does stream mode hash the opened descriptor before and after sequential reading with `pread`? Which file changes are detected by the hash comparison and metadata checks?
+54. Derive the queue and active-window byte/count limits. What is the difference between dropping an event with an unknown interval and aborting the run for a hard resource limit?
+55. Why does the active TTL index store `(host, event_second)` entries? What invariant connects its global order to each host's deque front?
+56. How does the stream ID cache distinguish an exact retransmission from a conflicting reuse? What uniqueness guarantee is lost after an ID expires from the bounded cache?
+57. Describe the failure path from a malformed or backward-timestamp input record to the existing destination file. Which syscalls make temporary output publication atomic, and what durability guarantee is absent?
 
-The optional reports, rule-correlation analysis, dataset freeze/audit, aggregate input-size checks, and active-window payload release have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.
+The optional reports, rule-correlation analysis, dataset freeze/audit, aggregate input-size checks, active-window payload release, and bounded stream replay have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

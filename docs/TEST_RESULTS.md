@@ -1,6 +1,6 @@
 # Test Results — Linux Ransomware Behavior Detection Lab
 
-Status: the current working tree is unverified. The historical Release, Clang, sanitizer, and selected synthetic results below describe the source before the dataset freeze/audit commands, active-window payload release, 512 MiB aggregate input cap, optional CSV/HTML evaluation reports, and bounded rule-correlation analysis were implemented. No builds, tests, schema checks, analyzers, or diff validation have been run for the current changes. Overall SRS verification remains partial; automated results do not establish owner mastery or real-world detection efficacy.
+Status: the current working tree is unverified. The historical Release, Clang, sanitizer, and selected synthetic results below describe the source before the dataset freeze/audit commands, active-window payload release, 512 MiB aggregate input cap, optional CSV/HTML evaluation reports, bounded rule-correlation analysis, and `replay --stream` were implemented. No builds, tests, schema checks, analyzers, or diff validation have been run for these current changes. Overall SRS verification remains partial; automated results do not establish owner mastery or real-world detection efficacy.
 
 ## Environment
 
@@ -43,11 +43,11 @@ Per-decision samples cover window scoring and evidence assembly; they exclude pa
 
 - The optional CSV/HTML report implementation and its prediction-count/timeline limits are unverified. The intended checks are listed in `docs/TEST_PLAN.md` and should be performed only when verification is resumed.
 - The `analyze-rules` report implementation and its `bdetect.rule_analysis.v1` schema are unverified. In particular, pair-count arithmetic, phi edge cases, hostile IDs, and the bounded-work refusal path have not been exercised.
-- The 512 MiB input-file cap, read-time growth checks, and active-window string release have not been exercised. A bounded online queue, watermark finalization, and interval-scoped TTL eviction remain unimplemented.
+- The 512 MiB input-file cap, read-time growth checks, active-window string release, and new `replay --stream` path have not been exercised. Stream queue/active-window overflow, ID-cache expiry, atomic output cleanup, same-descriptor hashing, and unknown-window boundaries remain unverified. The strict-order stream does not implement bounded out-of-order watermarking, asynchronous producer backpressure, or online sequence-gap finalization.
 - The dataset-freeze/audit commands and both new schemas have not been checked. Manifest no-overwrite semantics, ledger locking/permissions, modification recording, and ruleset-hash mismatch behavior remain unverified; the ledger is not cryptographically tamper-proof.
 
 - Negative schema-conformance cases and importer/timestamp fuzzing are not complete; generated records, decisions, and the replay-stats sidecar passed their published schemas. The 100,000-run fuzzer targeted the JSON parser only.
-- Missing-record detection remains unavailable when upstream events have no producer sequence/session metadata. Sequence audit runs only after full batch load and applies unknown status at host scope; an online lateness watermark and window-scoped gap attribution are not implemented.
+- Missing-record detection remains unavailable when upstream events have no producer sequence/session metadata. Batch sequence audit runs after full batch load and applies unknown status at host scope. Stream mode rejects producer sequence metadata and backward timestamps; an out-of-order lateness watermark and window-scoped gap attribution are not implemented.
 - No independently collected or representative benign/security dataset has been evaluated. No frozen, independently held-out dataset, signed manifest, or test-data modification ledger exists yet.
 - The rule hash and per-run dataset hash are emitted, but trust/authentication of those hashes is not established.
 - Repeated 100k performance baselines and cross-distribution runs remain open; p95 was measured once on the documented synthetic multi-window workload.

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <fcntl.h>
 #include <fstream>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -31,17 +33,24 @@ namespace {
 using bdetect::json::Value;
 constexpr std::size_t MAX_RECORD_BYTES = 1024U * 1024U;
 constexpr std::size_t MAX_DECISION_RECORD_BYTES = 64U * 1024U * 1024U;
+constexpr std::size_t MAX_DECISION_REASON_EVIDENCE_BYTES = 32U * 1024U * 1024U;
 constexpr std::uintmax_t MAX_INPUT_FILE_BYTES = 512U * 1024U * 1024U;
 constexpr std::size_t MAX_EVENT_COUNT = 1000000U;
 constexpr std::size_t MAX_LABEL_COUNT = 100000U;
 constexpr std::size_t MAX_LABEL_FIELD_BYTES = 256U;
 constexpr std::size_t MAX_RULE_PAIR_UPDATES = 10000000U;
+constexpr std::size_t MAX_STREAM_QUEUE_COUNT = 4096U;
+constexpr std::size_t MAX_STREAM_QUEUE_BYTES = 64U * 1024U * 1024U;
+constexpr std::size_t MAX_STREAM_ACTIVE_EVENTS = 100000U;
+constexpr std::size_t MAX_STREAM_ACTIVE_BYTES = 64U * 1024U * 1024U;
+constexpr std::size_t MAX_STREAM_ID_CACHE = 100000U;
 struct Event {
     std::string id, source, host, kind, path, observed, coverage, content_hash;
     std::string producer_session_id;
     std::uint64_t producer_sequence = 0;
     bool has_producer_sequence = false;
     std::int64_t epoch = 0;
+    std::size_t record_bytes = 0;
 };
 
 void release_event_payload(Event &event) {
@@ -404,6 +413,71 @@ bool valid_utf8(const std::string &text) {
     return true;
 }
 
+Event parse_event_line(const std::string &line) {
+    if (!valid_utf8(line)) throw std::runtime_error("invalid UTF-8");
+    Value root = bdetect::json::Parser(line).parse();
+    if (required_text(root, "schema_version") != "event.v1")
+        throw std::runtime_error("unsupported schema_version");
+    Event e;
+    e.id = required_text(root, "event_id");
+    e.source = required_text(root, "source");
+    e.host = required_text(root, "host_id");
+    const Value *producer_session = root.get("producer_session_id");
+    const Value *producer_sequence = root.get("producer_sequence");
+    if ((producer_session == nullptr) != (producer_sequence == nullptr))
+        throw std::runtime_error("producer_session_id and producer_sequence must appear together");
+    if (producer_session) {
+        const auto *session = std::get_if<std::string>(&producer_session->data);
+        const double *sequence = std::get_if<double>(&producer_sequence->data);
+        if (!session || session->empty() || session->size() > 128U)
+            throw std::runtime_error("producer_session_id must be a nonempty string of at most 128 bytes");
+        if (!sequence || !std::isfinite(*sequence) || std::floor(*sequence) != *sequence ||
+            *sequence < 1.0 || *sequence > 9007199254740991.0)
+            throw std::runtime_error("producer_sequence must be an exact positive safe integer");
+        e.producer_session_id = *session;
+        e.producer_sequence = static_cast<std::uint64_t>(*sequence);
+        e.has_producer_sequence = true;
+    }
+    e.kind = required_text(root, "kind");
+    const std::string severity = required_text(root, "severity");
+    e.observed = required_text(root, "observed_at");
+    e.epoch = parse_time(e.observed);
+    e.record_bytes = line.size();
+    e.content_hash = sha256(line);
+    const Value &target = required(root, "target");
+    (void)object_value(target, "target");
+    e.path = required_text(target, "path");
+    validate_optional_integer(target, "device");
+    validate_optional_integer(target, "inode");
+    const Value &actor = required(root, "actor");
+    (void)object_value(actor, "actor");
+    validate_nullable_integer(actor, "pid");
+    validate_nullable_integer(actor, "start_time_ticks");
+    const std::string attribution = required_text(actor, "attribution");
+    if (attribution != "unknown" && attribution != "kernel_observed")
+        throw std::runtime_error("invalid actor attribution");
+    (void)object_value(required(root, "evidence"), "evidence");
+    const Value &coverage = required(root, "coverage");
+    (void)object_value(coverage, "coverage");
+    e.coverage = required_text(coverage, "state");
+    if (e.coverage != "healthy" && e.coverage != "degraded" &&
+        e.coverage != "unsupported" && e.coverage != "recovering")
+        throw std::runtime_error("invalid coverage state");
+    if (const Value *reason = coverage.get("reason"); reason &&
+        !std::holds_alternative<std::nullptr_t>(reason->data) &&
+        !std::holds_alternative<std::string>(reason->data))
+        throw std::runtime_error("coverage reason must be string or null");
+    const std::set<std::string> severities = {"info", "low", "medium", "high", "critical"};
+    if (severity.empty() || !severities.contains(severity))
+        throw std::runtime_error("invalid event severity");
+    if (e.id.empty() || e.source.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
+        throw std::runtime_error("empty required event field");
+    if (e.id.size() > 256U || e.source.size() > 128U || e.host.size() > 256U ||
+        e.kind.size() > 128U || e.path.size() > 4096U)
+        throw std::runtime_error("event field length limit");
+    return e;
+}
+
 std::vector<Event> load_events(const std::string &file) {
     enforce_input_file_size(file);
     std::ifstream in(file, std::ios::binary);
@@ -425,69 +499,8 @@ std::vector<Event> load_events(const std::string &file) {
         input_bytes += record_bytes;
         if (line.empty()) continue;
         try {
-            if (!valid_utf8(line)) throw std::runtime_error("invalid UTF-8");
-            Value root = bdetect::json::Parser(line).parse();
-            if (required_text(root, "schema_version") != "event.v1")
-                throw std::runtime_error("unsupported schema_version");
-            Event e;
-            e.id = required_text(root, "event_id");
-            e.source = required_text(root, "source");
-            e.host = required_text(root, "host_id");
-            const Value *producer_session = root.get("producer_session_id");
-            const Value *producer_sequence = root.get("producer_sequence");
-            if ((producer_session == nullptr) != (producer_sequence == nullptr))
-                throw std::runtime_error("producer_session_id and producer_sequence must appear together");
-            if (producer_session) {
-                const auto *session = std::get_if<std::string>(&producer_session->data);
-                const double *sequence = std::get_if<double>(&producer_sequence->data);
-                if (!session || session->empty() || session->size() > 128U)
-                    throw std::runtime_error("producer_session_id must be a nonempty string of at most 128 bytes");
-                if (!sequence || !std::isfinite(*sequence) || std::floor(*sequence) != *sequence ||
-                    *sequence < 1.0 || *sequence > 9007199254740991.0)
-                    throw std::runtime_error("producer_sequence must be an exact positive safe integer");
-                e.producer_session_id = *session;
-                e.producer_sequence = static_cast<std::uint64_t>(*sequence);
-                e.has_producer_sequence = true;
-            }
-            e.kind = required_text(root, "kind");
-            const std::string severity = required_text(root, "severity");
-            e.observed = required_text(root, "observed_at");
-            e.epoch = parse_time(e.observed);
-            e.content_hash = sha256(line);
-            const Value &target = required(root, "target");
-            (void)object_value(target, "target");
-            e.path = required_text(target, "path");
-            validate_optional_integer(target, "device");
-            validate_optional_integer(target, "inode");
-            const Value &actor = required(root, "actor");
-            (void)object_value(actor, "actor");
-            validate_nullable_integer(actor, "pid");
-            validate_nullable_integer(actor, "start_time_ticks");
-            const std::string attribution = required_text(actor, "attribution");
-            if (attribution != "unknown" && attribution != "kernel_observed")
-                throw std::runtime_error("invalid actor attribution");
-            (void)object_value(required(root, "evidence"), "evidence");
-            const Value &coverage = required(root, "coverage");
-            (void)object_value(coverage, "coverage");
-            e.coverage = required_text(coverage, "state");
-            if (e.coverage != "healthy" && e.coverage != "degraded" &&
-                e.coverage != "unsupported" && e.coverage != "recovering")
-                throw std::runtime_error("invalid coverage state");
-            if (const Value *reason = coverage.get("reason"); reason &&
-                !std::holds_alternative<std::nullptr_t>(reason->data) &&
-                !std::holds_alternative<std::string>(reason->data))
-                throw std::runtime_error("coverage reason must be string or null");
-            const std::set<std::string> severities = {"info", "low", "medium", "high", "critical"};
-            if (severity.empty() || !severities.contains(severity))
-                throw std::runtime_error("invalid event severity");
-            if (e.id.empty() || e.source.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
-                throw std::runtime_error("empty required event field");
-            if (e.id.size() > 256U || e.source.size() > 128U || e.host.size() > 256U ||
-                e.kind.size() > 128U || e.path.size() > 4096U)
-                throw std::runtime_error("event field length limit");
-            if (events.size() == MAX_EVENT_COUNT)
-                throw std::runtime_error("event cardinality limit");
-            events.push_back(std::move(e));
+            if (events.size() == MAX_EVENT_COUNT) throw std::runtime_error("event cardinality limit");
+            events.push_back(parse_event_line(line));
         } catch (const std::exception &ex) {
             throw std::runtime_error("line " + std::to_string(line_no) + ": " + ex.what());
         }
@@ -686,7 +699,8 @@ void pace_replay(const std::vector<Event> &events, double speed) {
 
 std::vector<Decision> evaluate(std::vector<Event> &events, const Rules &r,
                                const IntakeIssues &issues,
-                               std::vector<std::uint64_t> *decision_latency_ns = nullptr) {
+                               std::vector<std::uint64_t> *decision_latency_ns = nullptr,
+                               std::optional<std::int64_t> only_end = std::nullopt) {
     std::map<std::string, std::vector<Event *>> by_host;
     for (Event &e : events) by_host[e.host].push_back(&e);
     std::vector<Decision> out;
@@ -708,6 +722,7 @@ std::vector<Decision> evaluate(std::vector<Event> &events, const Rules &r,
             while (right_cursor < host_events.size() && host_events[right_cursor]->epoch <= end)
                 ++right_cursor;
             const std::size_t right = right_cursor;
+            if (only_end && end != *only_end) continue;
             const std::size_t count = right - left;
             Decision d;
             d.host = host;
@@ -742,6 +757,7 @@ std::vector<Decision> evaluate(std::vector<Event> &events, const Rules &r,
                 }
             }
             d.event_ids.assign(ids.begin(), ids.end());
+            std::size_t reason_evidence_bytes = 0;
             auto host_issue = issues.find(host);
             if (host_issue != issues.end()) d.unknown = host_issue->second;
             const bool intake_degraded = host_issue != issues.end() && !host_issue->second.empty();
@@ -776,8 +792,15 @@ std::vector<Decision> evaluate(std::vector<Event> &events, const Rules &r,
                         Reason reason{rule.id, rule.feature, rule.op, observed,
                                       rule.threshold, rule.weight, rule.weight, {}};
                         const auto evidence = feature_event_ids.find(rule.feature);
-                        if (evidence != feature_event_ids.end())
+                        if (evidence != feature_event_ids.end()) {
+                            for (const std::string &event_id : evidence->second) {
+                                const std::size_t encoded_bytes = encoded_string_size(event_id);
+                                if (encoded_bytes > MAX_DECISION_REASON_EVIDENCE_BYTES - reason_evidence_bytes)
+                                    throw std::runtime_error("decision rule evidence exceeds 32 MiB limit");
+                                reason_evidence_bytes += encoded_bytes;
+                            }
                             reason.source_event_ids.assign(evidence->second.begin(), evidence->second.end());
+                        }
                         d.reasons.push_back(std::move(reason));
                     }
                 }
@@ -797,11 +820,8 @@ std::vector<Decision> evaluate(std::vector<Event> &events, const Rules &r,
     return out;
 }
 
-void write_decisions(const std::string &path, const std::vector<Decision> &ds,
-                     const Rules &r, const std::string &dataset_hash) {
-    std::ofstream out(path);
-    if (!out) throw std::runtime_error("cannot open output");
-    for (const auto &d : ds) {
+std::string serialize_decision(const Decision &d, const Rules &r,
+                               const std::string &dataset_hash) {
         std::size_t estimate = 1024U;
         auto account_string = [&estimate](const std::string &value) {
             const std::size_t encoded = encoded_string_size(value);
@@ -828,6 +848,7 @@ void write_decisions(const std::string &path, const std::vector<Decision> &ds,
         }
         const bool degraded = std::any_of(d.unknown.begin(), d.unknown.end(),
             [](const std::string &reason) { return reason != "insufficient_events"; });
+        std::ostringstream out;
         out << "{\"schema_version\":\"decision.v1\",\"decision_id\":\"" << escape(d.id)
             << "\",\"ruleset_revision\":\"" << escape(r.revision) << "\",\"entity_key\":\""
             << escape(d.host) << "\",\"window_start\":\"" << d.start << "\",\"window_end\":\""
@@ -860,9 +881,22 @@ void write_decisions(const std::string &path, const std::vector<Decision> &ds,
         out << "],\"unknown_fields\":[";
         for (std::size_t i = 0; i < d.unknown.size(); ++i) {
             if (i) out << ',';
-            out << '"' << d.unknown[i] << '"';
+            out << '"' << escape(d.unknown[i]) << '"';
         }
-        out << "]}\n";
+        out << "]}";
+        std::string record = out.str();
+        if (record.size() > MAX_DECISION_RECORD_BYTES)
+            throw std::runtime_error("decision record exceeds output limit");
+        return record;
+}
+
+void write_decisions(const std::string &path, const std::vector<Decision> &ds,
+                     const Rules &r, const std::string &dataset_hash) {
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("cannot open output");
+    for (const auto &d : ds) {
+        out << serialize_decision(d, r, dataset_hash) << '\n';
+        if (!out) throw std::runtime_error("cannot write output");
     }
 }
 
@@ -914,6 +948,365 @@ void write_all_fd(int fd, std::string_view content) {
         if (written <= 0) throw std::runtime_error("file write failed");
         offset += static_cast<std::size_t>(written);
     }
+}
+
+class AtomicDecisionOutput {
+public:
+    explicit AtomicDecisionOutput(std::string target)
+        : target_(std::move(target)), temporary_(target_ + ".tmp." + std::to_string(getpid()) + ".stream") {
+        if (target_.empty()) throw std::runtime_error("--out requires a file path");
+        fd_ = open(temporary_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd_ < 0) throw std::runtime_error("cannot create temporary replay output");
+    }
+
+    ~AtomicDecisionOutput() {
+        if (fd_ >= 0) (void)close(fd_);
+        if (!committed_) (void)unlink(temporary_.c_str());
+    }
+
+    AtomicDecisionOutput(const AtomicDecisionOutput &) = delete;
+    AtomicDecisionOutput &operator=(const AtomicDecisionOutput &) = delete;
+
+    void append(std::string_view record) {
+        if (record.size() >= MAX_INPUT_FILE_BYTES ||
+            output_bytes_ > MAX_INPUT_FILE_BYTES - record.size() - 1U)
+            throw std::runtime_error("stream decision output exceeds 512 MiB limit");
+        write_all_fd(fd_, record);
+        write_all_fd(fd_, "\n");
+        output_bytes_ += record.size() + 1U;
+    }
+
+    void commit() {
+        if (fsync(fd_) != 0) throw std::runtime_error("cannot persist replay output");
+        const int close_status = close(fd_);
+        fd_ = -1;
+        if (close_status != 0) throw std::runtime_error("cannot close replay output");
+        if (rename(temporary_.c_str(), target_.c_str()) != 0)
+            throw std::runtime_error("cannot publish replay output");
+        committed_ = true;
+    }
+
+private:
+    std::string target_;
+    std::string temporary_;
+    std::uintmax_t output_bytes_ = 0;
+    int fd_ = -1;
+    bool committed_ = false;
+};
+
+int next_input_byte(int fd, std::array<char, 65536> &buffer,
+                    std::size_t &position, std::size_t &available) {
+    if (position == available) {
+        for (;;) {
+            const ssize_t count = read(fd, buffer.data(), buffer.size());
+            if (count < 0 && errno == EINTR) continue;
+            if (count < 0) throw std::runtime_error("stream input read failure");
+            if (count == 0) return -1;
+            position = 0;
+            available = static_cast<std::size_t>(count);
+            break;
+        }
+    }
+    return static_cast<unsigned char>(buffer[position++]);
+}
+
+bool read_stream_line(int fd, std::array<char, 65536> &buffer,
+                      std::size_t &position, std::size_t &available,
+                      std::string &line, bool &had_newline) {
+    line.clear();
+    had_newline = false;
+    bool consumed = false;
+    for (;;) {
+        const int byte = next_input_byte(fd, buffer, position, available);
+        if (byte < 0) return consumed;
+        consumed = true;
+        if (byte == '\n') {
+            had_newline = true;
+            return true;
+        }
+        if (line.size() == MAX_RECORD_BYTES)
+            throw std::runtime_error("JSON record too large");
+        line.push_back(static_cast<char>(byte));
+    }
+}
+
+std::string sha256_fd(int fd, std::uintmax_t expected_size) {
+    using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    DigestContext digest(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!digest || EVP_DigestInit_ex(digest.get(), EVP_sha256(), nullptr) != 1)
+        throw std::runtime_error("stream input SHA-256 initialization failed");
+    std::array<char, 65536> buffer{};
+    std::uintmax_t offset = 0;
+    while (offset < expected_size) {
+        const std::size_t requested = static_cast<std::size_t>(
+            std::min<std::uintmax_t>(buffer.size(), expected_size - offset));
+        ssize_t count = -1;
+        do {
+            count = pread(fd, buffer.data(), requested, static_cast<off_t>(offset));
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0) throw std::runtime_error("stream input changed while hashing");
+        if (EVP_DigestUpdate(digest.get(), buffer.data(), static_cast<std::size_t>(count)) != 1)
+            throw std::runtime_error("stream input SHA-256 update failed");
+        offset += static_cast<std::uintmax_t>(count);
+    }
+    std::array<unsigned char, EVP_MAX_MD_SIZE> bytes{};
+    unsigned int size = 0;
+    if (EVP_DigestFinal_ex(digest.get(), bytes.data(), &size) != 1)
+        throw std::runtime_error("stream input SHA-256 finalization failed");
+    std::ostringstream text;
+    text << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < size; ++i)
+        text << std::setw(2) << static_cast<unsigned int>(bytes[i]);
+    return text.str();
+}
+
+struct StreamSeenId {
+    std::string content_hash;
+    std::int64_t epoch = 0;
+};
+
+std::size_t stream_replay(const std::string &input_path, const std::string &rules_path,
+                          const std::string &output_path, const Rules &rules, double speed) {
+    if (input_path.empty() || output_path.empty())
+        throw std::runtime_error("stream replay requires --input and --out");
+    if (same_file_or_path(input_path, output_path) || same_file_or_path(rules_path, output_path))
+        throw std::runtime_error("replay output must be separate from input and rules");
+    if (!std::isfinite(speed) || speed < 0.0 || speed > 100000.0)
+        throw std::runtime_error("replay speed must be between 0 and 100000");
+
+    const int input_fd = open(input_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (input_fd < 0) throw std::runtime_error("cannot securely open stream input");
+    struct InputGuard {
+        int fd;
+        ~InputGuard() { if (fd >= 0) (void)close(fd); }
+    } input_guard{input_fd};
+    struct stat initial_stat {};
+    if (fstat(input_fd, &initial_stat) != 0 || !S_ISREG(initial_stat.st_mode) ||
+        initial_stat.st_size < 0 || static_cast<std::uintmax_t>(initial_stat.st_size) > MAX_INPUT_FILE_BYTES)
+        throw std::runtime_error("stream input must be a regular file of at most 512 MiB");
+    const std::string dataset_hash = sha256_fd(input_fd, static_cast<std::uintmax_t>(initial_stat.st_size));
+    using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    DigestContext consumed_digest(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!consumed_digest || EVP_DigestInit_ex(consumed_digest.get(), EVP_sha256(), nullptr) != 1)
+        throw std::runtime_error("stream input SHA-256 initialization failed");
+
+    AtomicDecisionOutput output(output_path);
+    std::array<char, 65536> input_buffer{};
+    std::size_t buffer_position = 0, buffer_available = 0;
+    std::string line;
+    std::uintmax_t input_bytes = 0;
+    std::size_t line_number = 0, event_count = 0, decision_count = 0;
+    bool have_pending_epoch = false, have_previous_event = false;
+    std::int64_t pending_epoch = 0, previous_epoch = 0;
+    std::map<std::string, std::vector<Event>> pending;
+    std::set<std::string> endpoint_hosts, seen_hosts;
+    std::size_t queued_count = 0, queued_bytes = 0;
+    std::map<std::string, std::deque<Event>> active;
+    std::deque<std::pair<std::string, std::int64_t>> active_order;
+    std::size_t active_count = 0, active_bytes = 0;
+    std::map<std::string, StreamSeenId> seen_ids;
+    std::deque<std::pair<std::string, std::int64_t>> seen_id_order;
+    std::map<std::string, std::map<std::string, std::int64_t>> issue_until;
+    bool have_first_epoch = false;
+    std::int64_t first_epoch = 0;
+    const auto pacing_origin = std::chrono::steady_clock::now();
+
+    auto mark_issue = [&issue_until, &rules](const std::string &host, const std::string &reason,
+                                            std::int64_t epoch) {
+        const std::int64_t expiry = epoch + rules.window;
+        auto &host_reasons = issue_until[host];
+        const auto found = host_reasons.find(reason);
+        if (found == host_reasons.end()) host_reasons.emplace(reason, expiry);
+        else found->second = std::max(found->second, expiry);
+    };
+    auto flush_endpoint = [&](std::int64_t epoch) {
+        if (speed > 0.0) {
+            if (!have_first_epoch) {
+                have_first_epoch = true;
+                first_epoch = epoch;
+            }
+            const double elapsed = static_cast<double>(epoch - first_epoch) / speed;
+            if (!std::isfinite(elapsed) || elapsed > 3600.0)
+                throw std::runtime_error("paced stream replay duration exceeds one hour");
+            const auto deadline = pacing_origin + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(elapsed));
+            std::this_thread::sleep_until(deadline);
+        }
+
+        const std::int64_t window_start = epoch - rules.window;
+        while (!active_order.empty() && active_order.front().second < window_start) {
+            const auto [host, event_epoch] = std::move(active_order.front());
+            active_order.pop_front();
+            auto host_active = active.find(host);
+            if (host_active == active.end() || host_active->second.empty() ||
+                host_active->second.front().epoch != event_epoch)
+                throw std::runtime_error("stream active-window index is inconsistent");
+            active_bytes -= host_active->second.front().record_bytes;
+            release_event_payload(host_active->second.front());
+            host_active->second.pop_front();
+            --active_count;
+            if (host_active->second.empty()) active.erase(host_active);
+        }
+
+        for (auto &[host, events] : pending) {
+            for (Event &event : events) {
+                if (active_count >= MAX_STREAM_ACTIVE_EVENTS ||
+                    event.record_bytes > MAX_STREAM_ACTIVE_BYTES - active_bytes) {
+                    mark_issue(host, "active_window_capacity_exceeded", epoch);
+                    continue;
+                }
+                const std::int64_t event_epoch = event.epoch;
+                active_bytes += event.record_bytes;
+                ++active_count;
+                active[host].push_back(std::move(event));
+                active_order.emplace_back(host, event_epoch);
+            }
+        }
+
+        for (const std::string &host : endpoint_hosts) {
+            IntakeIssues endpoint_issues;
+            const auto host_issues = issue_until.find(host);
+            if (host_issues != issue_until.end()) {
+                for (const auto &[reason, expiry] : host_issues->second)
+                    if (epoch <= expiry) add_issue(endpoint_issues, host, reason);
+            }
+
+            std::vector<Event> snapshot;
+            const auto host_active = active.find(host);
+            if (host_active != active.end())
+                snapshot.assign(host_active->second.begin(), host_active->second.end());
+            auto decisions = evaluate(snapshot, rules, endpoint_issues, nullptr, epoch);
+            Decision decision;
+            if (decisions.empty()) {
+                decision.host = host;
+                decision.start = std::to_string(window_start);
+                decision.end = std::to_string(epoch);
+                decision.label = "unknown";
+                decision.unknown = endpoint_issues[host];
+                if (decision.unknown.empty())
+                    decision.unknown.push_back("bounded_reorder_queue_overflow");
+                std::set<std::string> event_ids;
+                if (host_active != active.end())
+                    for (const Event &event : host_active->second)
+                        if (event.epoch >= window_start && event.epoch <= epoch)
+                            event_ids.insert(event.id);
+                decision.event_ids.assign(event_ids.begin(), event_ids.end());
+            } else {
+                decision = std::move(decisions.front());
+            }
+            decision.id = "decision-" + std::to_string(++decision_count) + "-" + host;
+            output.append(serialize_decision(decision, rules, dataset_hash));
+        }
+
+        pending.clear();
+        endpoint_hosts.clear();
+        queued_count = 0;
+        queued_bytes = 0;
+    };
+
+    bool had_newline = false;
+    for (;;) {
+        try {
+            if (!read_stream_line(input_fd, input_buffer, buffer_position, buffer_available,
+                                  line, had_newline))
+                break;
+        } catch (const std::exception &ex) {
+            throw std::runtime_error("line " + std::to_string(line_number + 1U) + ": " + ex.what());
+        }
+        ++line_number;
+        const std::uintmax_t row_bytes = static_cast<std::uintmax_t>(line.size()) +
+                                         (had_newline ? 1U : 0U);
+        if (row_bytes > MAX_INPUT_FILE_BYTES - input_bytes)
+            throw std::runtime_error("stream input exceeded 512 MiB limit while reading");
+        input_bytes += row_bytes;
+        if ((!line.empty() && EVP_DigestUpdate(consumed_digest.get(), line.data(), line.size()) != 1) ||
+            (had_newline && EVP_DigestUpdate(consumed_digest.get(), "\n", 1U) != 1))
+            throw std::runtime_error("stream input SHA-256 update failed");
+        if (line.empty()) continue;
+        if (event_count == MAX_EVENT_COUNT)
+            throw std::runtime_error("stream event cardinality limit");
+        ++event_count;
+
+        Event event;
+        try {
+            event = parse_event_line(line);
+        } catch (const std::exception &ex) {
+            throw std::runtime_error("line " + std::to_string(line_number) + ": " + ex.what());
+        }
+        if (event.has_producer_sequence)
+            throw std::runtime_error("--stream does not accept producer sequence metadata; use batch replay");
+        if (have_previous_event && event.epoch < previous_epoch)
+            throw std::runtime_error("--stream requires nondecreasing event-time input; use batch replay");
+        previous_epoch = event.epoch;
+        have_previous_event = true;
+
+        const std::int64_t retention = rules.window + (rules.lateness_ms + 999) / 1000;
+        const std::int64_t id_cutoff = event.epoch - retention;
+        while (!seen_id_order.empty() && seen_id_order.front().second < id_cutoff) {
+            const auto [old_id, old_epoch] = std::move(seen_id_order.front());
+            seen_id_order.pop_front();
+            const auto found = seen_ids.find(old_id);
+            if (found != seen_ids.end() && found->second.epoch == old_epoch)
+                seen_ids.erase(found);
+        }
+        auto duplicate = seen_ids.find(event.id);
+        if (duplicate != seen_ids.end()) {
+            if (duplicate->second.content_hash != event.content_hash)
+                throw std::runtime_error("conflicting duplicate event_id in stream");
+            continue;
+        }
+        if (seen_hosts.insert(event.host).second && seen_hosts.size() > static_cast<std::size_t>(rules.max_entities))
+            throw std::runtime_error("stream entity cardinality limit");
+        if (seen_ids.size() >= MAX_STREAM_ID_CACHE)
+            throw std::runtime_error("stream event ID cache limit reached; use batch replay");
+        seen_ids.emplace(event.id, StreamSeenId{event.content_hash, event.epoch});
+        seen_id_order.emplace_back(event.id, event.epoch);
+
+        if (have_pending_epoch && event.epoch != pending_epoch) {
+            flush_endpoint(pending_epoch);
+            have_pending_epoch = false;
+        }
+        if (!have_pending_epoch) {
+            pending_epoch = event.epoch;
+            have_pending_epoch = true;
+        }
+        endpoint_hosts.insert(event.host);
+        const bool queue_overflow = queued_count >= MAX_STREAM_QUEUE_COUNT ||
+            event.record_bytes > MAX_STREAM_QUEUE_BYTES - queued_bytes;
+        if (queue_overflow) {
+            mark_issue(event.host, "bounded_reorder_queue_overflow", event.epoch);
+            continue;
+        }
+        queued_bytes += event.record_bytes;
+        ++queued_count;
+        pending[event.host].push_back(std::move(event));
+    }
+    if (have_pending_epoch) flush_endpoint(pending_epoch);
+
+    std::array<unsigned char, EVP_MAX_MD_SIZE> consumed_bytes{};
+    unsigned int consumed_size = 0;
+    if (EVP_DigestFinal_ex(consumed_digest.get(), consumed_bytes.data(), &consumed_size) != 1)
+        throw std::runtime_error("stream input SHA-256 finalization failed");
+    std::ostringstream consumed_text;
+    consumed_text << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < consumed_size; ++i)
+        consumed_text << std::setw(2) << static_cast<unsigned int>(consumed_bytes[i]);
+    if (consumed_text.str() != dataset_hash)
+        throw std::runtime_error("stream bytes changed between hashing and parsing");
+
+    struct stat final_stat {};
+    if (fstat(input_fd, &final_stat) != 0 || final_stat.st_size < 0 ||
+        initial_stat.st_dev != final_stat.st_dev || initial_stat.st_ino != final_stat.st_ino ||
+        initial_stat.st_size != final_stat.st_size || input_bytes != static_cast<std::uintmax_t>(final_stat.st_size) ||
+        initial_stat.st_mtim.tv_sec != final_stat.st_mtim.tv_sec ||
+        initial_stat.st_mtim.tv_nsec != final_stat.st_mtim.tv_nsec ||
+        initial_stat.st_ctim.tv_sec != final_stat.st_ctim.tv_sec ||
+        initial_stat.st_ctim.tv_nsec != final_stat.st_ctim.tv_nsec)
+        throw std::runtime_error("stream input changed during replay");
+    if (sha256_fd(input_fd, static_cast<std::uintmax_t>(final_stat.st_size)) != dataset_hash)
+        throw std::runtime_error("stream input changed during replay");
+    output.commit();
+    return decision_count;
 }
 
 void write_frozen_manifest(const std::string &path, std::string_view content) {
@@ -1570,7 +1963,7 @@ static std::string arg(int argc, char **argv, const std::string &name, const std
 int main(int argc, char **argv) {
     try {
         if (argc < 2 || std::string(argv[1]) == "--help") {
-            std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER] [--stats-out FILE]\n"
+            std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER] [--stats-out FILE] [--stream]\n"
                          "bdetect evaluate --pred FILE --labels CSV --report FILE [--csv-report FILE] [--html-report FILE]\n"
                          "bdetect analyze-rules --input DECISIONS --report FILE\n"
                          "bdetect dataset-freeze --dev FILE --holdout FILE --rules FILE --manifest NEW-FILE\n"
@@ -1595,8 +1988,28 @@ int main(int argc, char **argv) {
         } else if (command == "generate-fixtures") {
             generate_fixtures(arg(argc, argv, "--out"), arg(argc, argv, "--root"));
         } else if (command == "replay") {
-            Rules rules = load_rules(arg(argc, argv, "--rules"));
+            const std::string rules_path = arg(argc, argv, "--rules");
+            Rules rules = load_rules(rules_path);
             const std::string input_path = arg(argc, argv, "--input");
+            const std::string output_path = arg(argc, argv, "--out");
+            const std::string stats_path = arg(argc, argv, "--stats-out");
+            bool stats_requested = false, stream_requested = false;
+            for (int i = 2; i < argc; ++i)
+                if (std::string(argv[i]) == "--stats-out") stats_requested = true;
+                else if (std::string(argv[i]) == "--stream") stream_requested = true;
+            if (stream_requested) {
+                if (stats_requested)
+                    throw std::runtime_error("--stats-out is not available with --stream");
+                std::size_t speed_bytes = 0;
+                const std::string speed_arg = arg(argc, argv, "--speed", "0");
+                double speed = 0.0;
+                try { speed = std::stod(speed_arg, &speed_bytes); }
+                catch (...) { throw std::runtime_error("invalid replay speed"); }
+                if (speed_bytes != speed_arg.size()) throw std::runtime_error("invalid replay speed");
+                const std::size_t decisions = stream_replay(input_path, rules_path,
+                                                             output_path, rules, speed);
+                std::cout << "decisions=" << decisions << " simulation_only=true stream=true\n";
+            } else {
             enforce_input_file_size(input_path);
             const std::string dataset_hash = sha256_file(input_path);
             auto input_events = load_events(input_path);
@@ -1613,11 +2026,6 @@ int main(int argc, char **argv) {
             catch (...) { throw std::runtime_error("invalid replay speed"); }
             if (speed_bytes != speed_arg.size()) throw std::runtime_error("invalid replay speed");
             pace_replay(events, speed);
-            const std::string output_path = arg(argc, argv, "--out");
-            const std::string stats_path = arg(argc, argv, "--stats-out");
-            bool stats_requested = false;
-            for (int i = 2; i < argc; ++i)
-                if (std::string(argv[i]) == "--stats-out") stats_requested = true;
             if (stats_requested && stats_path.empty())
                 throw std::runtime_error("--stats-out requires a file path");
             if (!stats_path.empty() &&
@@ -1637,6 +2045,7 @@ int main(int argc, char **argv) {
                 write_replay_stats(stats_path, input_event_count, decisions.size(),
                                    evaluation_duration_ns, std::move(decision_latency_ns));
             std::cout << "decisions=" << decisions.size() << " simulation_only=true\n";
+            }
         } else if (command == "evaluate") {
             evaluate_labels(arg(argc, argv, "--pred"), arg(argc, argv, "--labels"),
                             arg(argc, argv, "--report"), arg(argc, argv, "--csv-report"),
