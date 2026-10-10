@@ -49,5 +49,10 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 34. Why does mixing sequenced and unsequenced records for the same host/source degrade coverage, while a source that is wholly unsequenced remains under the legacy behavior?
 35. How does `read_csv_record` distinguish escaped quotes from a closing quote, and which resource limits apply to a logical multiline record?
 36. How is nearest-rank p95 computed from the optional stats sidecar, what work is excluded, and how would you check that enabling it leaves decision bytes unchanged?
+37. Which rows and columns are emitted by the optional CSV report, and how do you prove its counts and rates match the JSON metrics without conflating unknown with false negatives?
+38. Why does the report sort by numeric window end and then entity/start strings? What determinism properties would change if timestamps were sorted lexically without validation?
+39. Which characters must `html_escape` encode before untrusted entity keys or labels are placed in a static HTML document? What additional risks would appear if scripts or raw event paths were added?
+40. How do the one-million prediction cap and 100,000-row report cap bound memory and work? Which report data remain resident, and what could be streamed safely?
+41. Why should the HTML and CSV reports omit raw file paths by default? What privacy risks remain in entity keys and in the underlying decision JSONL?
 
-Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.
+The optional report implementation has not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

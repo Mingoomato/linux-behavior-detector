@@ -26,17 +26,17 @@ Create table-driven invalid records for missing paired metadata, wrong scalar ty
 
 **Acceptance:** Positive and negative cases run deterministically, report the schema/property responsible for rejection, and remain separate from parser fuzz results.
 
-## Exercise 3 — Add an auditable CSV metrics report
+## Exercise 3 — Design bounded online event retention
 
-**Goal:** Add an optional CSV output for the confusion matrix and rates while keeping the current JSON report available.
+**Goal:** Replace whole-corpus retention with a bounded streaming window that expires old state by TTL while preserving conservative unknown decisions.
 
-**Starting points:** `evaluate_labels`, the `evaluate` CLI dispatch, `docs/TEST_PLAN.md`, and the existing JSON report fields.
+**Starting points:** `load_events`, `normalize_events`, `evaluate`, the configured `window_seconds`/`lateness_tolerance_ms`, and `docs/ARCHITECTURE.md`.
 
-Define stable columns for each metric, its numerator, denominator, value, and unknown predictions. Add synthetic valid and zero-denominator cases, then verify that quoting and line endings remain valid for CSV consumers.
+Specify a watermark, maximum in-flight event count and byte size, queue overflow behavior, and when a source sequence gap becomes final. Define how a late event affects already emitted windows and how TTL eviction interacts with overlapping windows. Keep the current batch mode available while introducing the streaming path.
 
-**Constraints:** Keep existing JSON output byte-compatible, preserve `N/A` for zero denominators, keep unknown separate from TP/FP/TN/FN, and do not disclose raw paths or extra prediction evidence.
+**Constraints:** Do not claim a missing event when the producer supplies no sequence metadata. Do not evict evidence still needed by an open window. Keep actor attribution unknown and preserve the rule that degraded coverage cannot become benign. Use only synthetic event fixtures.
 
-**Acceptance:** JSON and CSV outputs report identical counts/rates; tests cover normal and zero-denominator cases and parse the CSV report with a standard reader.
+**Acceptance:** Memory use is bounded by documented queue/feature limits; deterministic synthetic cases cover in-order data, bounded disorder, late arrivals, sequence gaps, overflow, TTL expiry, and unknown propagation. Record any tradeoff for already finalized windows.
 
 ## Owner attempt record
 

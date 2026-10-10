@@ -1,6 +1,6 @@
 # Test Results — Linux Ransomware Behavior Detection Lab
 
-Status: the local Release, Clang, sanitizer, and selected synthetic verification gates pass. Overall SRS verification remains partial; this is not evidence of owner mastery or real-world detection efficacy.
+Status: the current working tree is unverified. The historical Release, Clang, sanitizer, and selected synthetic results below describe the source before optional CSV/HTML evaluation reports and their prediction limits were implemented. No builds, tests, schema checks, analyzers, or diff validation have been run for the current changes. Overall SRS verification remains partial; automated results do not establish owner mastery or real-world detection efficacy.
 
 ## Environment
 
@@ -40,6 +40,8 @@ The new multi-window probe used one synthetic host with 100,000 file.modified ev
 Per-decision samples cover window scoring and evidence assembly; they exclude parsing, pacing, serialization, and file writes. The measured values describe this synthetic workload on this host. One run is not a repeated performance baseline or a resource guarantee for all allowed inputs.
 
 ## Remaining verification gaps
+
+- The optional CSV/HTML report implementation and its prediction-count/timeline limits are unverified. The intended checks are listed in `docs/TEST_PLAN.md` and should be performed only when verification is resumed.
 
 - Negative schema-conformance cases and importer/timestamp fuzzing are not complete; generated records, decisions, and the replay-stats sidecar passed their published schemas. The 100,000-run fuzzer targeted the JSON parser only.
 - Missing-record detection remains unavailable when upstream events have no producer sequence/session metadata. Sequence audit runs only after full batch load and applies unknown status at host scope; an online lateness watermark and window-scoped gap attribution are not implemented.

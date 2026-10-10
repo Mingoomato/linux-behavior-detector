@@ -21,7 +21,7 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 | BHD-FR-015 | bounded line reader, field caps, event cap, `max_entities` | targeted bounds pass; 100k probe completed (137,780 KiB max RSS); bounded streaming queue/TTL remains absent | IN_PROGRESS |
 | BHD-FR-016 | degraded coverage => unknown | BHD-T-009 pending | IMPLEMENTED |
 | BHD-FR-017 | CLI dispatch | `tests/smoke.sh` covers `replay`, `evaluate`, `explain`, `rules-validate`, and `generate-fixtures` | IMPLEMENTED |
-| BHD-FR-018 | — | not implemented | NOT_STARTED |
+| BHD-FR-018 | `evaluate_labels`, `PredictionRecord`, `write_csv_cell`, `html_escape`, `--csv-report`, `--html-report` | Optional CSV metrics/timeline and escaped static HTML confusion/timeline are implemented; rows omit raw paths and are capped at 100,000, predictions at 1,000,000. Report-specific verification has not been run. | IMPLEMENTED_UNVERIFIED |
 | BHD-FR-019 | — | not implemented | NOT_STARTED |
 | BHD-FR-020 | — | not applicable | NOT_APPLICABLE |
 | BHD-NFR-01 | deterministic replay | `tests/window_replay.py` compares paced/unpaced output bytes | PASS_SELECTED_CASES |

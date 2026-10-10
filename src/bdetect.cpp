@@ -859,8 +859,73 @@ void validate_events(const std::string &file) {
     std::cout << "{\"valid\":true,\"records\":" << events.size() << "}\n";
 }
 
+struct PredictionRecord {
+    std::string entity_key, actual, predicted, window_start, window_end, outcome;
+    std::int64_t end_epoch = 0;
+    std::string score;
+};
+
+void write_csv_cell(std::ostream &out, std::string_view value) {
+    out << '"';
+    for (char c : value) {
+        if (c == '"') out << "\"\"";
+        else out << c;
+    }
+    out << '"';
+}
+
+std::string html_escape(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (unsigned char c : value) {
+        if (c == '&') escaped += "&amp;";
+        else if (c == '<') escaped += "&lt;";
+        else if (c == '>') escaped += "&gt;";
+        else if (c == '"') escaped += "&quot;";
+        else if (c == '\'') escaped += "&#39;";
+        else if (c < 0x20U || c == 0x7fU) {
+            escaped += "&#";
+            escaped += std::to_string(c);
+            escaped += ';';
+        }
+        else escaped.push_back(c);
+    }
+    return escaped;
+}
+
+std::int64_t parse_report_epoch(const std::string &value, const char *field) {
+    if (value.empty() || value.size() > 32U)
+        throw std::runtime_error(std::string("invalid report window field: ") + field);
+    const std::size_t digit_start = value.front() == '-' ? 1U : 0U;
+    if (digit_start == value.size())
+        throw std::runtime_error(std::string("invalid report window field: ") + field);
+    for (std::size_t i = digit_start; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (c < '0' || c > '9')
+            throw std::runtime_error(std::string("invalid report window field: ") + field);
+    }
+    std::size_t used = 0;
+    long long parsed = 0;
+    try { parsed = std::stoll(value, &used, 10); }
+    catch (...) { throw std::runtime_error(std::string("invalid report window field: ") + field); }
+    if (used != value.size())
+        throw std::runtime_error(std::string("invalid report window field: ") + field);
+    return static_cast<std::int64_t>(parsed);
+}
+
 void evaluate_labels(const std::string &pred_path, const std::string &labels_path,
-                     const std::string &report) {
+                     const std::string &report, const std::string &csv_report,
+                     const std::string &html_report) {
+    for (const std::string *output : {&report, &csv_report, &html_report}) {
+        if (output->empty()) continue;
+        if (same_file_or_path(*output, pred_path) || same_file_or_path(*output, labels_path))
+            throw std::runtime_error("evaluation report must not replace an input file");
+    }
+    if (!csv_report.empty() && same_file_or_path(report, csv_report))
+        throw std::runtime_error("JSON and CSV reports must use different paths");
+    if (!html_report.empty() && (same_file_or_path(report, html_report) ||
+                                 (!csv_report.empty() && same_file_or_path(csv_report, html_report))))
+        throw std::runtime_error("evaluation reports must use different paths");
     std::map<std::string, std::string> labels;
     std::ifstream l(labels_path);
     if (!l) throw std::runtime_error("cannot open labels");
@@ -908,10 +973,15 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
     std::string line;
     int tp=0, fp=0, tn=0, fn=0, unknown=0;
     std::set<std::string> seen_entities;
+    std::vector<PredictionRecord> timeline;
     std::size_t prediction_line = 0;
+    std::size_t prediction_count = 0;
     while (read_limited_line(p, line, MAX_DECISION_RECORD_BYTES)) {
         ++prediction_line;
         if (line.empty()) continue;
+        if (prediction_count == MAX_EVENT_COUNT)
+            throw std::runtime_error("prediction cardinality limit");
+        ++prediction_count;
         Value v = bdetect::json::Parser(line, MAX_DECISION_RECORD_BYTES).parse();
         std::string key = required_text(v, "entity_key");
         std::string pred = required_text(v, "decision");
@@ -922,11 +992,37 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
         seen_entities.insert(key);
         if (pred != "benign" && pred != "suspicious" && pred != "unknown")
             throw std::runtime_error("invalid prediction label: " + pred);
-        if (pred == "unknown") { ++unknown; continue; }
         bool actual = it->second == "suspicious";
         bool detected = pred == "suspicious";
-        if (actual && detected) ++tp; else if (actual) ++fn;
-        else if (detected) ++fp; else ++tn;
+        std::string outcome;
+        if (pred == "unknown") { ++unknown; outcome = "UNKNOWN"; }
+        else if (actual && detected) { ++tp; outcome = "TP"; }
+        else if (actual) { ++fn; outcome = "FN"; }
+        else if (detected) { ++fp; outcome = "FP"; }
+        else { ++tn; outcome = "TN"; }
+        if (!csv_report.empty() || !html_report.empty()) {
+            if (timeline.size() == MAX_LABEL_COUNT)
+                throw std::runtime_error("timeline report row limit");
+            PredictionRecord row;
+            row.entity_key = key;
+            row.actual = it->second;
+            row.predicted = pred;
+            row.outcome = std::move(outcome);
+            row.window_start = required_text(v, "window_start");
+            row.window_end = required_text(v, "window_end");
+            row.end_epoch = parse_report_epoch(row.window_end, "window_end");
+            if (row.window_start.size() > 32U) throw std::runtime_error("invalid report window_start");
+            if (parse_report_epoch(row.window_start, "window_start") > row.end_epoch)
+                throw std::runtime_error("report window_start is after window_end");
+            if (const Value *score = v.get("score")) {
+                const double *number = std::get_if<double>(&score->data);
+                if (!number || !std::isfinite(*number) || std::floor(*number) != *number ||
+                    *number < 0 || *number > 1000000.0)
+                    throw std::runtime_error("invalid report score");
+                row.score = std::to_string(static_cast<int>(*number));
+            }
+            timeline.push_back(std::move(row));
+        }
     }
     for (const auto &[key, label] : labels) {
         (void)label;
@@ -943,6 +1039,77 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
         <<",\"fpr\":\""<<metric(fp,fp+tn)<<"\",\"fpr_numerator\":"<<fp
         <<",\"fpr_denominator\":"<<(fp+tn)<<",\"fnr\":\""<<metric(fn,fn+tp)
         <<"\",\"fnr_numerator\":"<<fn<<",\"fnr_denominator\":"<<(fn+tp)<<"}\n";
+    out.flush();
+    if (!out) throw std::runtime_error("cannot finish JSON evaluation report");
+
+    std::sort(timeline.begin(), timeline.end(), [](const PredictionRecord &a, const PredictionRecord &b) {
+        if (a.end_epoch != b.end_epoch) return a.end_epoch < b.end_epoch;
+        if (a.entity_key != b.entity_key) return a.entity_key < b.entity_key;
+        return a.window_start < b.window_start;
+    });
+    const int total_predictions = tp + fp + tn + fn + unknown;
+    const std::array<std::tuple<std::string_view, int, int, std::string>, 10> metrics = {{
+        {"tp", tp, tp + fn, std::to_string(tp)}, {"fp", fp, fp + tn, std::to_string(fp)},
+        {"tn", tn, tn + fp, std::to_string(tn)}, {"fn", fn, fn + tp, std::to_string(fn)},
+        {"unknown", unknown, total_predictions, std::to_string(unknown)},
+        {"total_predictions", total_predictions, total_predictions, std::to_string(total_predictions)},
+        {"precision", tp, tp + fp, metric(tp, tp + fp)},
+        {"recall", tp, tp + fn, metric(tp, tp + fn)},
+        {"fpr", fp, fp + tn, metric(fp, fp + tn)},
+        {"fnr", fn, fn + tp, metric(fn, fn + tp)}
+    }};
+    if (!csv_report.empty()) {
+        std::ofstream csv(csv_report, std::ios::binary);
+        if (!csv) throw std::runtime_error("cannot write CSV evaluation report");
+        const std::array<std::string_view, 12> headers = {"record_type", "metric", "entity_key",
+            "window_start", "window_end", "actual", "predicted", "outcome", "score",
+            "numerator", "denominator", "value"};
+        for (std::size_t i = 0; i < headers.size(); ++i) {
+            if (i) csv << ',';
+            write_csv_cell(csv, headers[i]);
+        }
+        csv << "\r\n";
+        for (const auto &[name, numerator, denominator, value] : metrics) {
+            write_csv_cell(csv, "metric"); csv << ','; write_csv_cell(csv, name);
+            csv << ",,,,,,," << numerator << ',' << denominator << ',';
+            write_csv_cell(csv, value); csv << "\r\n";
+        }
+        for (const PredictionRecord &row : timeline) {
+            write_csv_cell(csv, "decision"); csv << ",,";
+            write_csv_cell(csv, row.entity_key); csv << ',';
+            write_csv_cell(csv, row.window_start); csv << ',';
+            write_csv_cell(csv, row.window_end); csv << ',';
+            write_csv_cell(csv, row.actual); csv << ',';
+            write_csv_cell(csv, row.predicted); csv << ',';
+            write_csv_cell(csv, row.outcome); csv << ',';
+            write_csv_cell(csv, row.score); csv << ",,,\r\n";
+        }
+        csv.flush();
+        if (!csv) throw std::runtime_error("cannot finish CSV evaluation report");
+    }
+    if (!html_report.empty()) {
+        std::ofstream html(html_report, std::ios::binary);
+        if (!html) throw std::runtime_error("cannot write HTML evaluation report");
+        html << "<!doctype html><html lang=\"ko\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>BHD 평가 보고서 / Evaluation report</title>"
+                "<style>body{font:16px system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#17212b}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #c8d2dc;padding:.45rem;text-align:left}th{background:#edf2f7}.note{padding:.8rem;background:#fff7df}</style>"
+                "<h1>행위 탐지 평가 / Behavior detection evaluation</h1><p class=\"note\">합성 시뮬레이션 평가이며 악성코드 판정이 아닙니다. 파일 경로는 포함하지 않습니다. / Simulation-only fixture evaluation; not a malware verdict. No file paths are included.</p>"
+                "<h2>혼동행렬 지표 / Confusion metrics</h2><table><thead><tr><th>지표 / Metric</th><th>분자 / Numerator</th><th>분모 / Denominator</th><th>값 / Value</th></tr></thead><tbody>";
+        for (const auto &[name, numerator, denominator, value] : metrics) {
+            html << "<tr><td>" << html_escape(name) << "</td><td>" << numerator << "</td><td>"
+                 << denominator << "</td><td>" << html_escape(value) << "</td></tr>";
+        }
+        html << "</tbody></table><h2>판정 시간순 내역 / Decision timeline</h2><table><thead><tr><th>윈도우 종료 / Window end</th><th>윈도우 시작 / Window start</th><th>대상 / Entity</th><th>정답 / Actual</th><th>예측 / Predicted</th><th>결과 / Outcome</th><th>점수 / Score</th></tr></thead><tbody>";
+        for (const PredictionRecord &row : timeline) {
+            html << "<tr><td>" << html_escape(row.window_end) << "</td><td>"
+                 << html_escape(row.window_start) << "</td><td>" << html_escape(row.entity_key)
+                 << "</td><td>" << html_escape(row.actual) << "</td><td>"
+                 << html_escape(row.predicted) << "</td><td>" << html_escape(row.outcome)
+                 << "</td><td>" << html_escape(row.score) << "</td></tr>";
+        }
+        html << "</tbody></table></html>\n";
+        html.flush();
+        if (!html) throw std::runtime_error("cannot finish HTML evaluation report");
+    }
 }
 
 void generate_fixtures(const std::string &outdir, const std::string &root) {
@@ -1012,7 +1179,7 @@ int main(int argc, char **argv) {
     try {
         if (argc < 2 || std::string(argv[1]) == "--help") {
             std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER] [--stats-out FILE]\n"
-                         "bdetect evaluate --pred FILE --labels CSV --report FILE\n"
+                         "bdetect evaluate --pred FILE --labels CSV --report FILE [--csv-report FILE] [--html-report FILE]\n"
                          "bdetect rules-validate --file FILE\n"
                          "bdetect generate-fixtures --root SANDBOX --out NEW-DIR\n"
                          "bdetect explain --decision-id ID --input DECISIONS\n";
@@ -1066,7 +1233,8 @@ int main(int argc, char **argv) {
             std::cout << "decisions=" << decisions.size() << " simulation_only=true\n";
         } else if (command == "evaluate") {
             evaluate_labels(arg(argc, argv, "--pred"), arg(argc, argv, "--labels"),
-                            arg(argc, argv, "--report"));
+                            arg(argc, argv, "--report"), arg(argc, argv, "--csv-report"),
+                            arg(argc, argv, "--html-report"));
         } else if (command == "explain") {
             std::string wanted = arg(argc, argv, "--decision-id");
             std::ifstream in(arg(argc, argv, "--input"));
