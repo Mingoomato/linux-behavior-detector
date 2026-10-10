@@ -17,3 +17,16 @@ include(CTest)
 if(BUILD_TESTING)
     add_test(NAME behavior-fixtures COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh)
 endif()
+
+option(BDETECT_BUILD_FUZZER "Build the optional Clang libFuzzer JSON parser target" OFF)
+if(BDETECT_BUILD_FUZZER)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "BDETECT_BUILD_FUZZER requires Clang with libFuzzer support")
+    endif()
+    add_executable(bdetect-json-fuzz tests/fuzz_json.cpp)
+    target_include_directories(bdetect-json-fuzz PRIVATE include)
+    target_compile_options(bdetect-json-fuzz PRIVATE
+        -O1 -g -Wall -Wextra -Wpedantic -Werror -fno-omit-frame-pointer
+        -fsanitize=fuzzer,address,undefined)
+    target_link_options(bdetect-json-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()

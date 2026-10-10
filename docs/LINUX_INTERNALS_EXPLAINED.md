@@ -12,7 +12,7 @@ The event vector owns the parsed strings. Normalization copies accepted records 
 
 ## Event time and monotonic time
 
-`parse_time` validates an RFC 3339 date, clock, fractional field, and explicit `Z` or numeric offset, then normalizes the represented instant to epoch seconds. Fractional digits are accepted but discarded, so distinct subsecond events in one second are ordered at one-second precision. Window boundaries and lateness use event time, not the host's wall clock. Parser fuzz coverage remains open.
+`parse_time` validates an RFC 3339 date, clock, fractional field, and explicit `Z` or numeric offset, then normalizes the represented instant to epoch seconds. Fractional digits are accepted but discarded, so distinct subsecond events in one second are ordered at one-second precision. Window boundaries and lateness use event time, not the host's wall clock. A selected 100,000-run Clang libFuzzer campaign covered the JSON parser under ASan/UBSan; the importer and timestamp parser still need dedicated fuzz targets and longer campaigns.
 
 Optional `--speed` maps event-time offsets to `std::chrono::steady_clock` deadlines using `sleep_until`. The steady clock is monotonic and is not adjusted by wall-clock synchronization. Speed zero is fast/offline mode. Positive speed is only a replay pacing aid; it does not affect window membership or scores, and a scheduled wait above one hour is rejected. No direct `clock_gettime(2)` call appears in the source. On Linux, a standard-library implementation may obtain monotonic readings through platform runtime mechanisms, but that is an implementation detail.
 

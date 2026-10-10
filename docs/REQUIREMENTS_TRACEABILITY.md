@@ -4,7 +4,7 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 
 | Requirement | Source / artifact | Verification | Status |
 |---|---|---|---|
-| BHD-FR-001 | `contracts/event-v1.schema.json`, `read_limited_line`, `valid_utf8`, `load_events`, `parse_time` | Generated events pass Draft 2020-12 schema validation; focused required-field/type/timestamp/size, duplicate-key, strict-number and Unicode tests pass; fuzz matrix pending | IN_PROGRESS |
+| BHD-FR-001 | `contracts/event-v1.schema.json`, `read_limited_line`, `valid_utf8`, `load_events`, `parse_time` | Generated events pass Draft 2020-12 schema validation; focused required-field/type/timestamp/size, duplicate-key, strict-number and Unicode tests pass; optional Clang JSON parser fuzzer completed one 100k ASan/UBSan campaign; importer/timestamp fuzz and negative schema matrix remain open | IN_PROGRESS |
 | BHD-FR-002 | host-level grouping; actor ignored | `tests/window_replay.py` supplies an untrusted PID with unknown attribution and asserts no actor is emitted | IMPLEMENTED |
 | BHD-FR-003 | `pace_replay`, `std::chrono::steady_clock`, event-time windows | `tests/window_replay.py` checks paced/unpaced byte-equivalence; this remains an offline batch replayer | IMPLEMENTED |
 | BHD-FR-004 | `normalize_events` exact-ID dedupe, bounded lateness, stable reorder, optional producer session/sequence validation | `tests/window_replay.py` covers in-tolerance event-time reorder, numeric sequence ordering, a gap, producer restart, sequence collision, mixed metadata, and missing-pair rejection; whole-corpus batch finalization only | IMPLEMENTED_BATCH_SCOPE |
@@ -27,6 +27,6 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 | BHD-NFR-01 | deterministic replay | `tests/window_replay.py` compares paced/unpaced output bytes | PASS_SELECTED_CASES |
 | BHD-NFR-02 | measurable evidence | synthetic confusion matrix, event IDs, and 100k wall-time/RSS recorded; p95 latency not measured | PARTIAL |
 | BHD-NFR-03 | 100k performance | one 100k run recorded in `docs/TEST_RESULTS.md`; no repeated baseline or p95 measurement | PARTIAL |
-| BHD-NFR-04 | malformed input stability | required fields, UTF-8, timestamp, rule errors plus ASan/UBSan; parser fuzzing pending | PARTIAL |
+| BHD-NFR-04 | malformed input stability | required fields, UTF-8, timestamp, rule errors plus Release/ASan/UBSan; optional parser fuzzer completed 100k runs without crash, broader importer/timestamp fuzzing remains open | PARTIAL |
 | BHD-NFR-05 | synthetic expectation | 4/4 generated suspicious fixtures and 0/8 benign false positives in the generated wiring check only | PASS_SYNTHETIC_ONLY |
 | BHD-NFR-06 | explainability | every suspicious fixture includes rule-specific contributing event IDs; focused test asserts mapping | PASS_SELECTED_CASES |

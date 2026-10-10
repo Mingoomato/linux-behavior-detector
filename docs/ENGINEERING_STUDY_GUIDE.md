@@ -4,7 +4,7 @@
 
 This lab follows synthetic file-event records from input validation to evidence-backed host decisions. Study how event time differs from replay pacing, how the code fails closed to `unknown`, and how configured rule weights become auditable contributions. This is a deterministic simulation, not an endpoint protection product.
 
-The GCC and Clang Release builds plus focused CTest pass on the current Linux host; ASan/UBSan verification also passes. Tests check 10/30/60-second windows, reordering, duplicates, lateness, optional producer sequence gaps and restarts, rule weights, hashes, and paced/unpaced equivalence. They do not prove real-world detection quality, missing-event detection without source sequences, online watermark semantics, holdout integrity, parser fuzz safety, or the 100k performance target. Automated completion is not evidence of owner mastery.
+The GCC and Clang Release builds plus focused CTest pass on the current Linux host; ASan/UBSan verification also passes. Tests check 10/30/60-second windows, reordering, duplicates, lateness, optional producer sequence gaps and restarts, quoted CSV labels, rule weights, hashes, and paced/unpaced equivalence. One optional 100,000-run Clang libFuzzer campaign exercised the JSON parser under ASan/UBSan without a crash, but it does not establish importer/timestamp fuzz safety. These checks do not prove real-world detection quality, missing-event detection without source sequences, online watermark semantics, holdout integrity, or the 100k performance target. Automated completion is not evidence of owner mastery.
 
 ## Why each subsystem exists
 
@@ -61,6 +61,7 @@ Read `docs/ARCHITECTURE.md`, then trace `main` → `load_rules`/`load_events` �
 
 - [C++ `std::chrono::steady_clock`](https://en.cppreference.com/w/cpp/chrono/steady_clock.html) and [C++ file streams](https://en.cppreference.com/w/cpp/io/basic_ifstream.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
+- [LLVM libFuzzer documentation](https://llvm.org/docs/LibFuzzer.html)
 - [Linux `timegm(3)`](https://man7.org/linux/man-pages/man3/timegm.3.html) and [`clock_gettime(2)`](https://man7.org/linux/man-pages/man2/clock_gettime.2.html)
 - [RFC 8259 — JSON](https://www.rfc-editor.org/rfc/rfc8259), [RFC 4180 — CSV format](https://www.rfc-editor.org/rfc/rfc4180), [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)
 - [Linux inotify documentation](https://docs.kernel.org/filesystems/inotify.html) and [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html) for possible upstream collectors; neither is implemented here.

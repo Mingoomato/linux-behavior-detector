@@ -14,17 +14,17 @@ Design a temporary-file protocol in the destination directory, define when the o
 
 **Acceptance:** A failed write leaves the previous complete result intact (or no result if none existed), successful replacement yields a complete valid JSONL file, and tests pass under sanitizers.
 
-## Exercise 2 — Fuzz the JSON and timestamp boundary
+## Exercise 2 — Add a negative schema-conformance matrix
 
-**Goal:** Add a parser fuzz target that explores malformed JSON and timestamps without process crashes, undefined behavior, or unbounded record growth.
+**Goal:** Test that every published event, rule, and decision schema rejects representative invalid values as well as accepting valid fixtures.
 
-**Starting points:** `include/bdetect/json.hpp`, `load_events`, `parse_time`, `CMakeLists.txt`, and `tests/window_replay.py`.
+**Starting points:** `contracts/*.schema.json`, generated fixture output, `docs/TEST_PLAN.md`, and a Draft 2020-12 validator.
 
-Create a fuzz harness for the parser/import boundary and seed it with duplicate keys, nesting limits, malformed escapes, invalid UTF-8, oversized fields, offsets, fractions, invalid dates, and missing timezone markers. Make the harness reusable under a supported coverage-guided fuzzer and sanitizer build.
+Create table-driven invalid records for missing paired metadata, wrong scalar types, out-of-range integers, invalid enum values, bad nested structures, and unexpected decision flags. Record which checks belong to JSON Schema and which require application-level validation.
 
-**Constraints:** Keep the 1 MiB record cap and line-numbered failures. Do not add a runtime dependency to normal release builds. Keep fuzz-generated data synthetic.
+**Constraints:** Keep Draft 2020-12 semantics, event line numbers, synthetic-only data, and the distinction between schema validity and semantic trust. Do not add a schema-validation runtime dependency to the normal executable.
 
-**Acceptance:** The harness builds with sanitizers, a bounded fuzz session completes without crash/UB, and saved regression cases remain in deterministic tests.
+**Acceptance:** Positive and negative cases run deterministically, report the schema/property responsible for rejection, and remain separate from parser fuzz results.
 
 ## Exercise 3 — Add an auditable CSV metrics report
 
