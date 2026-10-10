@@ -54,5 +54,9 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 39. Which characters must `html_escape` encode before untrusted entity keys or labels are placed in a static HTML document? What additional risks would appear if scripts or raw event paths were added?
 40. How do the one-million prediction cap and 100,000-row report cap bound memory and work? Which report data remain resident, and what could be streamed safely?
 41. Why should the HTML and CSV reports omit raw file paths by default? What privacy risks remain in entity keys and in the underlying decision JSONL?
+42. Derive the four pairwise contingency counts from two rules' marginal activation counts and their joint count. How does the implementation avoid counting duplicate rule reasons twice in one decision?
+43. Compare Jaccard similarity with the phi coefficient. When is phi undefined, and how can overlapping windows distort either statistic?
+44. What does the ten-million pair-update cap bound? Why does the analysis reject dense input rather than truncate the report silently?
+45. How do the 512 MiB file limit and per-record limit complement event-count/cardinality caps? Which allocations still remain proportional to the complete batch?
 
-The optional report implementation has not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.
+The optional reports, rule-correlation analysis, and aggregate input-size checks have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

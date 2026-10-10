@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -27,9 +28,11 @@ namespace {
 using bdetect::json::Value;
 constexpr std::size_t MAX_RECORD_BYTES = 1024U * 1024U;
 constexpr std::size_t MAX_DECISION_RECORD_BYTES = 64U * 1024U * 1024U;
+constexpr std::uintmax_t MAX_INPUT_FILE_BYTES = 512U * 1024U * 1024U;
 constexpr std::size_t MAX_EVENT_COUNT = 1000000U;
 constexpr std::size_t MAX_LABEL_COUNT = 100000U;
 constexpr std::size_t MAX_LABEL_FIELD_BYTES = 256U;
+constexpr std::size_t MAX_RULE_PAIR_UPDATES = 10000000U;
 struct Event {
     std::string id, source, host, kind, path, observed, coverage, content_hash;
     std::string producer_session_id;
@@ -80,11 +83,18 @@ std::string sha256_file(const std::string &path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot open input for hashing: " + path);
     std::array<char, 65536> buffer{};
+    std::uintmax_t total_bytes = 0;
     while (in) {
         in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto count = in.gcount();
-        if (count > 0 && EVP_DigestUpdate(ctx.get(), buffer.data(), static_cast<std::size_t>(count)) != 1)
-            throw std::runtime_error("SHA-256 update failed");
+        if (count > 0) {
+            const auto bytes = static_cast<std::uintmax_t>(count);
+            if (bytes > MAX_INPUT_FILE_BYTES - total_bytes)
+                throw std::runtime_error("input file exceeds 512 MiB hashing limit");
+            total_bytes += bytes;
+            if (EVP_DigestUpdate(ctx.get(), buffer.data(), static_cast<std::size_t>(count)) != 1)
+                throw std::runtime_error("SHA-256 update failed");
+        }
     }
     if (in.bad()) throw std::runtime_error("input read failure while hashing");
     std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
@@ -344,6 +354,14 @@ bool read_limited_line(std::istream &in, std::string &line,
     return consumed;
 }
 
+void enforce_input_file_size(const std::string &path) {
+    std::error_code error;
+    const std::uintmax_t bytes = std::filesystem::file_size(path, error);
+    if (error) throw std::runtime_error("cannot determine input file size: " + path);
+    if (bytes > MAX_INPUT_FILE_BYTES)
+        throw std::runtime_error("input file exceeds 512 MiB limit: " + path);
+}
+
 bool valid_utf8(const std::string &text) {
     const auto *bytes = reinterpret_cast<const unsigned char *>(text.data());
     for (std::size_t i = 0; i < text.size();) {
@@ -367,11 +385,13 @@ bool valid_utf8(const std::string &text) {
 }
 
 std::vector<Event> load_events(const std::string &file) {
+    enforce_input_file_size(file);
     std::ifstream in(file, std::ios::binary);
     if (!in) throw std::runtime_error("cannot open input: " + file);
     std::vector<Event> events;
     std::string line;
     std::size_t line_no = 0;
+    std::uintmax_t input_bytes = 0;
     for (;;) {
         try {
             if (!read_limited_line(in, line)) break;
@@ -379,6 +399,10 @@ std::vector<Event> load_events(const std::string &file) {
             throw std::runtime_error("line " + std::to_string(line_no + 1U) + ": " + ex.what());
         }
         ++line_no;
+        const std::uintmax_t record_bytes = static_cast<std::uintmax_t>(line.size()) + 1U;
+        if (record_bytes > MAX_INPUT_FILE_BYTES - input_bytes)
+            throw std::runtime_error("input file exceeded 512 MiB limit while reading");
+        input_bytes += record_bytes;
         if (line.empty()) continue;
         try {
             if (!valid_utf8(line)) throw std::runtime_error("invalid UTF-8");
@@ -916,6 +940,8 @@ std::int64_t parse_report_epoch(const std::string &value, const char *field) {
 void evaluate_labels(const std::string &pred_path, const std::string &labels_path,
                      const std::string &report, const std::string &csv_report,
                      const std::string &html_report) {
+    enforce_input_file_size(labels_path);
+    enforce_input_file_size(pred_path);
     for (const std::string *output : {&report, &csv_report, &html_report}) {
         if (output->empty()) continue;
         if (same_file_or_path(*output, pred_path) || same_file_or_path(*output, labels_path))
@@ -976,8 +1002,13 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
     std::vector<PredictionRecord> timeline;
     std::size_t prediction_line = 0;
     std::size_t prediction_count = 0;
+    std::uintmax_t prediction_bytes = 0;
     while (read_limited_line(p, line, MAX_DECISION_RECORD_BYTES)) {
         ++prediction_line;
+        const std::uintmax_t record_bytes = static_cast<std::uintmax_t>(line.size()) + 1U;
+        if (record_bytes > MAX_INPUT_FILE_BYTES - prediction_bytes)
+            throw std::runtime_error("prediction input exceeded 512 MiB limit");
+        prediction_bytes += record_bytes;
         if (line.empty()) continue;
         if (prediction_count == MAX_EVENT_COUNT)
             throw std::runtime_error("prediction cardinality limit");
@@ -1112,6 +1143,126 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
     }
 }
 
+void analyze_rule_correlations(const std::string &input_path, const std::string &report_path) {
+    if (same_file_or_path(input_path, report_path))
+        throw std::runtime_error("rule analysis report must not replace its input");
+    enforce_input_file_size(input_path);
+    std::ifstream in(input_path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open decisions for rule analysis");
+    std::set<std::string> rules;
+    std::map<std::string, std::uint64_t> activations;
+    std::map<std::pair<std::string, std::string>, std::uint64_t> coactivations;
+    std::string line;
+    std::size_t line_number = 0;
+    std::uint64_t decision_count = 0;
+    std::size_t pair_updates = 0;
+    std::uintmax_t input_bytes = 0;
+    while (read_limited_line(in, line, MAX_DECISION_RECORD_BYTES)) {
+        ++line_number;
+        const std::uintmax_t record_bytes = static_cast<std::uintmax_t>(line.size()) + 1U;
+        if (record_bytes > MAX_INPUT_FILE_BYTES - input_bytes)
+            throw std::runtime_error("rule analysis input exceeded 512 MiB limit");
+        input_bytes += record_bytes;
+        if (line.empty()) continue;
+        if (decision_count == MAX_EVENT_COUNT)
+            throw std::runtime_error("rule analysis decision limit");
+        Value decision;
+        try {
+            decision = bdetect::json::Parser(line, MAX_DECISION_RECORD_BYTES).parse();
+        } catch (const std::exception &ex) {
+            throw std::runtime_error("decision line " + std::to_string(line_number) + ": " + ex.what());
+        }
+        const Value *reasons_value = decision.get("reasons");
+        const auto *reasons = reasons_value
+            ? std::get_if<bdetect::json::Array>(&reasons_value->data) : nullptr;
+        if (!reasons)
+            throw std::runtime_error("decision line " + std::to_string(line_number) +
+                                     ": reasons must be an array");
+        std::set<std::string> active;
+        for (const Value &reason : *reasons) {
+            std::string id;
+            try { id = required_text(reason, "rule_id"); }
+            catch (const std::exception &ex) {
+                throw std::runtime_error("decision line " + std::to_string(line_number) +
+                                         ": invalid rule reason: " + ex.what());
+            }
+            if (id.empty() || id.size() > 128U)
+                throw std::runtime_error("decision line " + std::to_string(line_number) +
+                                         ": rule_id must be nonempty and bounded");
+            if (!valid_utf8(id))
+                throw std::runtime_error("decision line " + std::to_string(line_number) +
+                                         ": rule_id must be valid UTF-8");
+            active.insert(std::move(id));
+        }
+        if (active.size() > 256U)
+            throw std::runtime_error("decision line exceeds rule cardinality limit");
+        for (const std::string &id : active) {
+            rules.insert(id);
+            if (rules.size() > 256U) throw std::runtime_error("rule analysis cardinality limit");
+            ++activations[id];
+        }
+        const std::size_t count = active.size();
+        const std::size_t updates = count * (count - (count > 0U ? 1U : 0U)) / 2U;
+        if (updates > MAX_RULE_PAIR_UPDATES - pair_updates)
+            throw std::runtime_error("rule correlation work limit");
+        pair_updates += updates;
+        for (auto first = active.begin(); first != active.end(); ++first) {
+            for (auto second = std::next(first); second != active.end(); ++second)
+                ++coactivations[{*first, *second}];
+        }
+        ++decision_count;
+    }
+    if (in.bad()) throw std::runtime_error("decision read failure during rule analysis");
+    std::ofstream out(report_path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("cannot open rule analysis report");
+    out << std::setprecision(8)
+        << "{\"schema_version\":\"bdetect.rule_analysis.v1\",\"decision_records\":"
+        << decision_count << ",\"pair_update_count\":" << pair_updates
+        << ",\"rules\":[";
+    bool first_rule = true;
+    for (const std::string &id : rules) {
+        if (!first_rule) out << ',';
+        first_rule = false;
+        out << "{\"rule_id\":\"" << escape(id) << "\",\"active_decisions\":"
+            << activations[id] << '}';
+    }
+    out << "],\"pairs\":[";
+    bool first_pair = true;
+    for (auto first = rules.begin(); first != rules.end(); ++first) {
+        for (auto second = std::next(first); second != rules.end(); ++second) {
+            const std::uint64_t both = coactivations[{*first, *second}];
+            const std::uint64_t first_active = activations[*first];
+            const std::uint64_t second_active = activations[*second];
+            const std::uint64_t first_only = first_active - both;
+            const std::uint64_t second_only = second_active - both;
+            const std::uint64_t neither = decision_count - both - first_only - second_only;
+            const std::uint64_t union_count = both + first_only + second_only;
+            const long double phi_denominator = std::sqrt(
+                static_cast<long double>(first_active) * second_active *
+                (decision_count - first_active) * (decision_count - second_active));
+            if (!first_pair) out << ',';
+            first_pair = false;
+            out << "{\"rule_a\":\"" << escape(*first) << "\",\"rule_b\":\""
+                << escape(*second) << "\",\"both\":" << both
+                << ",\"a_only\":" << first_only << ",\"b_only\":" << second_only
+                << ",\"neither\":" << neither << ",\"jaccard\":";
+            if (union_count == 0U) out << "null";
+            else out << static_cast<double>(both) / static_cast<double>(union_count);
+            out << ",\"phi\":";
+            if (phi_denominator == 0.0L) out << "null";
+            else {
+                const long double numerator = static_cast<long double>(both) * neither -
+                    static_cast<long double>(first_only) * second_only;
+                out << static_cast<double>(numerator / phi_denominator);
+            }
+            out << '}';
+        }
+    }
+    out << "],\"interpretation\":\"descriptive co-activation only; overlapping windows are dependent; no rule weights are changed\"}\n";
+    out.flush();
+    if (!out) throw std::runtime_error("cannot finish rule analysis report");
+}
+
 void generate_fixtures(const std::string &outdir, const std::string &root) {
     char root_real[4096], out_real[4096];
     struct stat root_stat {};
@@ -1180,6 +1331,7 @@ int main(int argc, char **argv) {
         if (argc < 2 || std::string(argv[1]) == "--help") {
             std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER] [--stats-out FILE]\n"
                          "bdetect evaluate --pred FILE --labels CSV --report FILE [--csv-report FILE] [--html-report FILE]\n"
+                         "bdetect analyze-rules --input DECISIONS --report FILE\n"
                          "bdetect rules-validate --file FILE\n"
                          "bdetect generate-fixtures --root SANDBOX --out NEW-DIR\n"
                          "bdetect explain --decision-id ID --input DECISIONS\n";
@@ -1194,6 +1346,7 @@ int main(int argc, char **argv) {
         } else if (command == "replay") {
             Rules rules = load_rules(arg(argc, argv, "--rules"));
             const std::string input_path = arg(argc, argv, "--input");
+            enforce_input_file_size(input_path);
             const std::string dataset_hash = sha256_file(input_path);
             auto input_events = load_events(input_path);
             if (sha256_file(input_path) != dataset_hash)
@@ -1235,12 +1388,21 @@ int main(int argc, char **argv) {
             evaluate_labels(arg(argc, argv, "--pred"), arg(argc, argv, "--labels"),
                             arg(argc, argv, "--report"), arg(argc, argv, "--csv-report"),
                             arg(argc, argv, "--html-report"));
+        } else if (command == "analyze-rules") {
+            analyze_rule_correlations(arg(argc, argv, "--input"), arg(argc, argv, "--report"));
         } else if (command == "explain") {
             std::string wanted = arg(argc, argv, "--decision-id");
-            std::ifstream in(arg(argc, argv, "--input"));
+            const std::string decision_path = arg(argc, argv, "--input");
+            enforce_input_file_size(decision_path);
+            std::ifstream in(decision_path, std::ios::binary);
             if (!in) throw std::runtime_error("cannot open decisions");
             std::string line; bool found=false;
+            std::uintmax_t input_bytes = 0;
             while (read_limited_line(in, line, MAX_DECISION_RECORD_BYTES)) {
+                const std::uintmax_t record_bytes = static_cast<std::uintmax_t>(line.size()) + 1U;
+                if (record_bytes > MAX_INPUT_FILE_BYTES - input_bytes)
+                    throw std::runtime_error("decision input exceeded 512 MiB limit");
+                input_bytes += record_bytes;
                 Value v=bdetect::json::Parser(line, MAX_DECISION_RECORD_BYTES).parse();
                 if (required(v,"decision_id").string_or()==wanted) { std::cout<<line<<'\n'; found=true; break; }
             }

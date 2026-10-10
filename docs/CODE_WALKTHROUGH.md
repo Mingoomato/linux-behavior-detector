@@ -28,6 +28,8 @@ When `--csv-report FILE` is requested, the evaluator retains up to 100,000 compa
 
 `explain` scans a decision file for an ID and prints that serialized record. It does not recompute or validate the underlying hashes.
 
+`analyze-rules --input DECISIONS --report FILE` reads only `reasons[].rule_id`, so paths and event evidence are not copied into the report. Per decision it deduplicates active rule IDs, updates marginal counts, and increments co-activation counts for active pairs. It then derives `a_only`, `b_only`, and `neither`, computes Jaccard and phi values, and emits a bounded `bdetect.rule_analysis.v1` report. Pair-update work is capped at ten million operations. Because replay emits overlapping windows, these rows must not be interpreted as independent samples or as proof that one signal causes another. The implementation and report contract are not technically verified yet.
+
 ## 6. Fixture sandbox and lifetimes
 
 `generate_fixtures` requires a pre-existing root and a new output directory, then verifies the resolved output is beneath the root before writing synthetic event streams and labels. It creates event metadata, not file workloads. File streams and OpenSSL contexts are RAII-managed.

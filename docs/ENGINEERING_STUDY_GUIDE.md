@@ -4,7 +4,7 @@
 
 This lab follows synthetic file-event records from input validation to evidence-backed host decisions. Study how event time differs from replay pacing, how the code fails closed to `unknown`, and how configured rule weights become auditable contributions. This is a deterministic simulation, not an endpoint protection product.
 
-Historical GCC/Clang Release builds, focused CTest, and ASan/UBSan checks passed before the optional CSV/HTML evaluator report feature was added. The current working tree is unverified; do not treat those earlier results as applying to it. Historical checks included 10/30/60-second windows, reordering, duplicates, lateness, optional producer sequence gaps and restarts, quoted CSV labels, rule weights, hashes, and paced/unpaced equivalence. One optional 100,000-run Clang libFuzzer campaign exercised the JSON parser under ASan/UBSan without a crash, but it does not establish importer/timestamp fuzz safety. These checks do not prove real-world detection quality, missing-event detection without source sequences, online watermark semantics, holdout integrity, repeated performance baselines, or resource behavior at maximum configured limits. Automated completion is not evidence of owner mastery.
+Historical GCC/Clang Release builds, focused CTest, and ASan/UBSan checks passed before the current input cap, optional CSV/HTML evaluator reports, and rule-correlation analysis were added. The current working tree is unverified; do not treat those earlier results as applying to it. Historical checks included 10/30/60-second windows, reordering, duplicates, lateness, optional producer sequence gaps and restarts, quoted CSV labels, rule weights, hashes, and paced/unpaced equivalence. One optional 100,000-run Clang libFuzzer campaign exercised the JSON parser under ASan/UBSan without a crash, but it does not establish importer/timestamp fuzz safety. These checks do not prove real-world detection quality, missing-event detection without source sequences, online watermark semantics, holdout integrity, repeated performance baselines, or resource behavior at maximum configured limits. Automated completion is not evidence of owner mastery.
 
 ## Why each subsystem exists
 
@@ -19,16 +19,18 @@ Historical GCC/Clang Release builds, focused CTest, and ASan/UBSan checks passed
 | Evidence writer and optional performance record | Preserve event IDs, rule/dataset hashes, windows, scores, contributions, coverage, and unknown reasons; optionally record per-decision scoring percentiles. | `write_decisions`, `write_replay_stats` |
 | Fixture and metric tools | Produce harmless synthetic input and a confusion-matrix wiring check; parse bounded quoted CSV labels and preserve metric denominators. | `generate_fixtures`, `evaluate_labels`, `read_csv_record` |
 | Optional evaluator reports | Export bounded, chronological metric and decision views to quoted CSV or escaped static HTML without including raw file paths. | `evaluate_labels`, `PredictionRecord`, `write_csv_cell`, `html_escape` |
+| Rule-correlation analysis | Summarize pair co-activation and contingency counts to highlight possibly redundant rules without changing weights. | `analyze_rule_correlations`, `analyze-rules` |
 
 ## Data and control flow
 
-1. `main` dispatches `rules-validate`, `generate-fixtures`, `replay`, `evaluate`, `explain`, or `validate-events`.
+1. `main` dispatches `rules-validate`, `generate-fixtures`, `replay`, `evaluate`, `analyze-rules`, `explain`, or `validate-events`.
 2. `replay` parses a bounded rules file and hashes its exact bytes. It hashes the input file, parses each JSONL line, and hashes it again to detect a file changed during loading.
 3. `load_events` checks UTF-8, event.v1 fields, bounded lengths, and the record/event caps. Actor fields are deliberately ignored; an unknown actor stays unknown.
 4. `normalize_events` removes exact duplicate IDs, marks conflicts and events outside the lateness tolerance as host-level unknown conditions, checks optional sequence metadata grouped by `(host, source, producer_session_id)`, enforces `max_entities`, and stably sorts by host/time/ID. A new producer session permits sequence reset; a sequence gap or duplicate sequence with different IDs degrades the host. Mixing sequenced and unsequenced records from one host/source also degrades it.
 5. Optional `--speed N` builds a global event-time timeline and uses `std::chrono::steady_clock` deadlines. Speed zero skips waiting. It does not alter event-time windows or score calculations.
 6. `evaluate` emits an overlapping event-time decision at each distinct event-second endpoint. Per-window sets count unique modified, renamed, deleted, extension, and event values. A matching rule adds its configured weight and a structured reason. Insufficient or degraded evidence yields `unknown`.
 7. `write_decisions` serializes source IDs, hashes, window, rule contributions, coverage, and `simulation_only=true`. When `--stats-out` is supplied, `evaluate` records each window's duration using `steady_clock`; `write_replay_stats` emits percentiles to a separate sidecar. It excludes input parsing, pacing, and JSON serialization. `evaluate_labels` joins predictions to CSV labels and computes confusion-matrix rates. Optional CSV/HTML flags retain at most 100,000 compact timeline rows, sort by window end/entity/start, and export actual/predicted labels and outcomes; prediction input itself is capped at one million rows.
+8. `analyze-rules` reads only rule IDs from each decision's `reasons[]`, computes marginals and pair contingency counts, then emits Jaccard and phi statistics. It rejects inputs exceeding 512 MiB, 1,000,000 decisions, 256 rules, or ten million pair updates. The output is descriptive; it does not reweight rules and overlapping windows are dependent observations.
 
 ## Memory ownership and resource lifetimes
 
@@ -36,7 +38,7 @@ Historical GCC/Clang Release builds, focused CTest, and ASan/UBSan checks passed
 - `normalize_events` maps and sets use `std::string_view` keys into the stable input vector. Those views remain valid only while that input vector lives and is not mutated.
 - `evaluate` stores non-owning pointers into the normalized vector, which remains alive and immutable for the entire call. Window feature sets own copied strings.
 - File streams and the OpenSSL digest context use RAII. The digest context is freed after hashing. No manual descriptor or memory cleanup path is required.
-- Input JSONL records are capped at 1 MiB; serialized decision records are capped at 64 MiB. Event/host/rule counts have caps, but windows and output can still approach input cardinality. Requested stats hold one 64-bit latency sample per decision and sort them to calculate exact percentiles, adding O(decisions) memory. Optional reports hold at most 100,000 `PredictionRecord` rows plus strings copied from predictions; prediction parsing stops at 1,000,000 non-empty records. There is no streaming queue or TTL eviction yet. Sequence analysis is whole-batch and host-level; it does not implement an online watermark or interval-scoped unknown decisions.
+- Input files are capped at 512 MiB, event JSONL records at 1 MiB, and serialized decision records at 64 MiB. Event/host/rule counts have caps, but windows and output can still approach input cardinality. Requested stats hold one 64-bit latency sample per decision and sort them to calculate exact percentiles, adding O(decisions) memory. Optional reports hold at most 100,000 `PredictionRecord` rows plus strings copied from predictions; prediction parsing stops at 1,000,000 non-empty records. Rule analysis holds at most 256 rule marginals and 10,000,000 co-activation updates. There is no streaming event queue or TTL eviction yet. Sequence analysis is whole-batch and host-level; it does not implement an online watermark or interval-scoped unknown decisions.
 
 ## Linux interfaces, concurrency, and security assumptions
 
@@ -53,11 +55,12 @@ Failure modes include malformed/oversized JSON, invalid required fields, rule er
 - Generic rule objects are auditable and configurable; their schema and feature vocabulary require strict validation. A learned model could capture interactions but would need independent data and calibration evidence.
 - A standards-compliant JSON library would expand parser coverage; the bundled small parser keeps dependencies low but needs fuzz and conformance work.
 - The optional HTML report is static and has no script dependency; escaped text cells limit markup injection, while an interactive dashboard would need a separate threat model and additional data-handling controls. The current CSV format uses quoted cells and CRLF records for spreadsheet compatibility.
+- Pairwise rule co-activation is easy to explain and cheap for sparse active sets; a full matrix becomes expensive with many decisions and rules. Jaccard ignores true negatives, while phi includes them and becomes undefined for constant signals. Neither is causal evidence, and adjacent overlapping windows are not independent. The work cap rejects overly dense analyses rather than silently truncating results.
 - Dataset manifests and immutable development/holdout splits would strengthen reproducibility. Per-run input hashes alone do not supply that separation.
 
 ## Study route
 
-Read `docs/ARCHITECTURE.md`, then trace `main` → `load_rules`/`load_events` → `normalize_events` → `pace_replay` → `evaluate` → `write_decisions`. Reconstruct one score from `reasons[]`; trace `evaluate_labels` into its metric rows, CSV quoting, and HTML escaping. The report implementation has not yet been technically verified. Then attempt one task from `docs/DEBUGGING_EXERCISES.md` independently and defend your design with `docs/TECHNICAL_INTERVIEW.md`.
+Read `docs/ARCHITECTURE.md`, then trace `main` → `load_rules`/`load_events` → `normalize_events` → `pace_replay` → `evaluate` → `write_decisions`. Reconstruct one score from `reasons[]`; trace `evaluate_labels` into metric rows, CSV quoting, and HTML escaping, then follow `analyze-rules` from reason IDs to pair counts. The recent cap, report, and analysis changes have not been technically verified. Then attempt one task from `docs/DEBUGGING_EXERCISES.md` independently and defend your design with `docs/TECHNICAL_INTERVIEW.md`.
 
 ## Official references
 

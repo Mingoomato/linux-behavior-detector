@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linuxsecurity.local/bdetect/contracts/rule-analysis-v1.schema.json",
+  "title": "BHD Rule Correlation Analysis v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "decision_records", "pair_update_count", "rules", "pairs", "interpretation"],
+  "properties": {
+    "schema_version": {"const": "bdetect.rule_analysis.v1"},
+    "decision_records": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "pair_update_count": {"type": "integer", "minimum": 0, "maximum": 10000000},
+    "rules": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "active_decisions"],
+        "properties": {
+          "rule_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "active_decisions": {"type": "integer", "minimum": 1, "maximum": 1000000}
+        }
+      }
+    },
+    "pairs": {
+      "type": "array",
+      "maxItems": 32640,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_a", "rule_b", "both", "a_only", "b_only", "neither", "jaccard", "phi"],
+        "properties": {
+          "rule_a": {"type": "string", "minLength": 1, "maxLength": 128},
+          "rule_b": {"type": "string", "minLength": 1, "maxLength": 128},
+          "both": {"type": "integer", "minimum": 0, "maximum": 1000000},
+          "a_only": {"type": "integer", "minimum": 0, "maximum": 1000000},
+          "b_only": {"type": "integer", "minimum": 0, "maximum": 1000000},
+          "neither": {"type": "integer", "minimum": 0, "maximum": 1000000},
+          "jaccard": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "phi": {"type": ["number", "null"], "minimum": -1, "maximum": 1}
+        }
+      }
+    },
+    "interpretation": {"const": "descriptive co-activation only; overlapping windows are dependent; no rule weights are changed"}
+  }
+}

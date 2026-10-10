@@ -18,11 +18,11 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 | BHD-FR-012 | `generate_fixtures` suspicious scenarios | `tests/smoke.sh` asserts all four synthetic suspicious cases and their contributing event IDs; these are still synthetic-only | IMPLEMENTED |
 | BHD-FR-013 | `evaluate_labels` | `tests/metrics.py` checks TP/FP/TN/FN/unknown, rate numerators/denominators, N/A, invalid labels, entity mismatches, bounded quoted commas/quotes/newlines, malformed quoting, and duplicate decoded keys | IMPLEMENTED |
 | BHD-FR-014 | `ruleset_sha256`, `dataset_sha256` in decisions | exact rule/input byte hashes are emitted and tested; independent dev/holdout split, freeze manifest, and modification ledger remain pending | IN_PROGRESS |
-| BHD-FR-015 | bounded line reader, field caps, event cap, `max_entities` | targeted bounds pass; 100k probe completed (137,780 KiB max RSS); bounded streaming queue/TTL remains absent | IN_PROGRESS |
+| BHD-FR-015 | bounded line reader, `MAX_INPUT_FILE_BYTES`, field/event/prediction caps, `max_entities`, `MAX_RULE_PAIR_UPDATES` | Code now caps input files at 512 MiB, event records at 1 MiB, decision records at 64 MiB, event/prediction cardinality at 1,000,000, and rule-analysis pair updates at 10,000,000. This resource hardening is unverified; bounded streaming queue, online watermark, and TTL eviction remain absent. | PARTIAL_UNVERIFIED |
 | BHD-FR-016 | degraded coverage => unknown | BHD-T-009 pending | IMPLEMENTED |
 | BHD-FR-017 | CLI dispatch | `tests/smoke.sh` covers `replay`, `evaluate`, `explain`, `rules-validate`, and `generate-fixtures` | IMPLEMENTED |
 | BHD-FR-018 | `evaluate_labels`, `PredictionRecord`, `write_csv_cell`, `html_escape`, `--csv-report`, `--html-report` | Optional CSV metrics/timeline and escaped static HTML confusion/timeline are implemented; rows omit raw paths and are capped at 100,000, predictions at 1,000,000. Report-specific verification has not been run. | IMPLEMENTED_UNVERIFIED |
-| BHD-FR-019 | — | not implemented | NOT_STARTED |
+| BHD-FR-019 | `analyze_rule_correlations`, `analyze-rules`, `contracts/rule-analysis-v1.schema.json` | Reports bounded per-decision pair contingency counts, Jaccard similarity, and phi correlation; it does not change rule weights. Implementation and schema have not been technically verified. | IMPLEMENTED_UNVERIFIED |
 | BHD-FR-020 | — | not applicable | NOT_APPLICABLE |
 | BHD-NFR-01 | deterministic replay | `tests/window_replay.py` compares paced/unpaced output bytes | PASS_SELECTED_CASES |
 | BHD-NFR-02 | measurable evidence | synthetic confusion matrix, event IDs, and 100k wall-time/RSS/p95 stats recorded; repeated baseline and representative data remain pending | PARTIAL |
