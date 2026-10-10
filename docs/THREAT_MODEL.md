@@ -1,13 +1,32 @@
-# Threat model
+# Threat Model
 
-## Inputs
+## Assets and trust boundaries
 
-NDJSON, rules JSON, labels CSV, and fixture output paths are untrusted. JSON nesting and record size are bounded. Duplicate JSON object keys, malformed strings, missing fields, invalid timestamps, and out-of-range rule limits are rejected.
+- Input NDJSON, rules JSON, labels CSV, CLI paths, and generated fixture destination are untrusted.
+- Host IDs, paths, event IDs, labels, and decisions can reveal operational or personal information.
+- Rule/input digests and the serialized decision are evidence only when the evidence store itself is protected.
+- The binary is an offline classifier. It does not monitor a system, stop a process, restore files, or attest an actor.
 
-## Privacy and attribution
+## Existing controls
 
-Only event metadata is consumed. The engine does not read file contents or environment variables. Input paths may be personal data; the current output includes host identifiers and event IDs, so all artifacts should remain local unless reviewed. No process identity is inferred from timestamps or inotify events.
+- JSON lines are capped at 1 MiB, parser nesting at 32, event count at one million, and event field lengths, host count, rule count, feature vocabulary, and numeric bounds are limited.
+- Duplicate JSON keys and invalid UTF-8 are rejected. Invalid records include source line numbers.
+- Exact duplicate event IDs are deduplicated; conflicting IDs and late events degrade affected host decisions to `unknown`.
+- Non-healthy event coverage and inadequate sample counts cannot produce a benign decision.
+- Fixture generation requires a new output directory beneath a pre-existing sandbox root.
+- Rules and input bytes are SHA-256 hashed; the input digest is checked again after parsing. Every result carries `simulation_only=true`.
+- Unknown actor attribution is not inferred from timestamps or nearby process IDs.
 
-## Residual risks
+## Residual risks and failure modes
 
-The custom JSON parser rejects UTF-16 surrogate escapes and accepts numeric syntax through the C library parser; extensive standards conformance and fuzzing have not been established. Rules and fixtures are not a representative malware dataset. Event-time windowing cannot detect missing records unless the producer supplies sequence metadata, and late or conflicting records degrade the host result. Synthetic performance says nothing about real-world efficacy.
+- The custom parser does not yet have a complete standards-conformance or fuzz record. Timestamp parsing now checks RFC 3339 offsets and calendar validity, but keeps only whole-second precision.
+- A million-event input can consume substantial memory because source and normalized vectors coexist and the number of output windows is not independently capped.
+- Label CSV parsing is simple; quoted values, invalid labels, and missing/extra label coverage require stronger checks.
+- Hashes identify bytes but do not establish the source, signing authority, label correctness, immutable history, or independent holdout status. A separate trusted manifest and access-controlled evidence store are needed.
+- The input is hashed before and after parsing, but a malicious writer could still coordinate changes around those reads; open-descriptor parsing and hashing would provide a tighter identity boundary.
+- Raw host identifiers and paths are emitted without pseudonymization. Keep generated and real evidence local and protect output permissions.
+- The generated labels are paired with generated data. Their confusion matrix is not an efficacy estimate, and baseline thresholds must not be tuned and reported against the same fixture set as holdout results.
+
+## Trust decisions
+
+When provenance or coverage is incomplete, the engine returns `unknown`. A replay hash mismatch aborts; parser, rule, resource-bound, read, or write failures return a nonzero error. The program does not try to recover by inventing an actor or silently downgrading evidence.

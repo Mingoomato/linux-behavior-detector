@@ -1,51 +1,121 @@
 #include "bdetect/json.hpp"
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
+#include <openssl/evp.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
 using bdetect::json::Value;
 constexpr std::size_t MAX_RECORD_BYTES = 1024U * 1024U;
+constexpr std::size_t MAX_DECISION_RECORD_BYTES = 64U * 1024U * 1024U;
 constexpr std::size_t MAX_EVENT_COUNT = 1000000U;
 struct Event {
-    std::string id, host, kind, path, observed, coverage;
+    std::string id, host, kind, path, observed, coverage, content_hash;
     std::int64_t epoch = 0;
+};
+struct Rule {
+    std::string id, feature, op;
+    int threshold = 0, weight = 0, min_samples = 1;
 };
 struct Rules {
     std::string revision = "baseline-1";
     int window = 30, lateness_ms = 2000, max_entities = 10000;
     int min_events = 10, cutoff = 60;
-    int rewrite = 40, rename = 30, deletion = 30, extension_types = 8;
+    std::string sha256;
+    std::vector<Rule> rules;
+};
+struct Reason {
+    std::string rule_id, feature, op;
+    int observed = 0, threshold = 0, weight = 0, contribution = 0;
+    std::vector<std::string> source_event_ids;
 };
 struct Decision {
     std::string id, host, label, start, end;
     int score = 0;
-    std::vector<std::string> reasons, event_ids;
+    std::vector<Reason> reasons;
+    std::vector<std::string> event_ids;
     std::vector<std::string> unknown;
 };
+
+std::string sha256(std::string_view data) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    if (EVP_Digest(data.data(), data.size(), digest.data(), &size, EVP_sha256(), nullptr) != 1)
+        throw std::runtime_error("SHA-256 calculation failed");
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < size; ++i) out << std::setw(2) << static_cast<unsigned>(digest[i]);
+    return out.str();
+}
+
+std::string sha256_file(const std::string &path) {
+    using Ctx = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    Ctx ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!ctx || EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1)
+        throw std::runtime_error("SHA-256 initialization failed");
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open input for hashing: " + path);
+    std::array<char, 65536> buffer{};
+    while (in) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = in.gcount();
+        if (count > 0 && EVP_DigestUpdate(ctx.get(), buffer.data(), static_cast<std::size_t>(count)) != 1)
+            throw std::runtime_error("SHA-256 update failed");
+    }
+    if (in.bad()) throw std::runtime_error("input read failure while hashing");
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    if (EVP_DigestFinal_ex(ctx.get(), digest.data(), &size) != 1)
+        throw std::runtime_error("SHA-256 finalization failed");
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < size; ++i) out << std::setw(2) << static_cast<unsigned>(digest[i]);
+    return out.str();
+}
 
 std::string escape(const std::string &s) {
     std::ostringstream o;
     for (unsigned char c : s) {
         if (c == '"' || c == '\\') o << '\\' << static_cast<char>(c);
         else if (c == '\n') o << "\\n";
-        else if (c >= 0x20U) o << static_cast<char>(c);
+        else if (c == '\r') o << "\\r";
+        else if (c == '\t') o << "\\t";
+        else if (c == '\b') o << "\\b";
+        else if (c == '\f') o << "\\f";
+        else if (c < 0x20U) {
+            static constexpr char hex[] = "0123456789abcdef";
+            o << "\\u00" << hex[c >> 4U] << hex[c & 0x0fU];
+        }
+        else o << static_cast<char>(c);
     }
     return o.str();
+}
+
+std::size_t encoded_string_size(const std::string &value) {
+    std::size_t size = 2U;
+    for (unsigned char c : value) {
+        const std::size_t extra = c == '"' || c == '\\' || c == '\n' || c == '\r' ||
+            c == '\t' || c == '\b' || c == '\f' ? 2U : c < 0x20U ? 6U : 1U;
+        size += extra;
+    }
+    return size;
 }
 
 const Value &required(const Value &v, const char *key) {
@@ -54,25 +124,103 @@ const Value &required(const Value &v, const char *key) {
     return *p;
 }
 
-std::int64_t parse_time(const std::string &s) {
-    std::tm tm{};
-    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
-    if (std::sscanf(s.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d",
-                    &year, &month, &day, &hour, &minute, &second) != 6)
-        throw std::runtime_error("invalid observed_at");
-    tm.tm_year = year - 1900; tm.tm_mon = month - 1; tm.tm_mday = day;
-    tm.tm_hour = hour; tm.tm_min = minute; tm.tm_sec = second;
-    return static_cast<std::int64_t>(timegm(&tm));
+const bdetect::json::Object &object_value(const Value &v, const char *field) {
+    const auto *object = std::get_if<bdetect::json::Object>(&v.data);
+    if (!object) throw std::runtime_error(std::string("field must be an object: ") + field);
+    return *object;
 }
 
-bool read_limited_line(std::istream &in, std::string &line) {
+std::string required_text(const Value &v, const char *field) {
+    const Value &value = required(v, field);
+    const auto *text = std::get_if<std::string>(&value.data);
+    if (!text) throw std::runtime_error(std::string("field must be a string: ") + field);
+    return *text;
+}
+
+void validate_nullable_integer(const Value &object, const char *field) {
+    const Value &value = required(object, field);
+    if (std::holds_alternative<std::nullptr_t>(value.data)) return;
+    const double *number = std::get_if<double>(&value.data);
+    if (!number || !std::isfinite(*number) || std::floor(*number) != *number ||
+        *number < 0 || *number > 9007199254740991.0)
+        throw std::runtime_error(std::string("field must be null or a nonnegative integer: ") + field);
+}
+
+void validate_optional_integer(const Value &object, const char *field) {
+    const Value *value = object.get(field);
+    if (!value) return;
+    const double *number = std::get_if<double>(&value->data);
+    if (!number || !std::isfinite(*number) || std::floor(*number) != *number ||
+        *number < 0 || *number > 9007199254740991.0)
+        throw std::runtime_error(std::string("field must be a nonnegative integer: ") + field);
+}
+
+std::int64_t parse_time(const std::string &s) {
+    auto digits = [&s](std::size_t first, std::size_t length) {
+        if (first + length > s.size()) throw std::runtime_error("invalid observed_at");
+        int value = 0;
+        for (std::size_t i = first; i < first + length; ++i) {
+            const char c = s[i];
+            if (c < '0' || c > '9') throw std::runtime_error("invalid observed_at");
+            value = value * 10 + (c - '0');
+        }
+        return value;
+    };
+    if (s.size() < 20U || s[4] != '-' || s[7] != '-' || (s[10] != 'T' && s[10] != 't') ||
+        s[13] != ':' || s[16] != ':')
+        throw std::runtime_error("observed_at must be RFC 3339");
+    const int year = digits(0, 4);
+    const int month = digits(5, 2);
+    const int day_of_month = digits(8, 2);
+    const int hour = digits(11, 2);
+    const int minute = digits(14, 2);
+    const int second = digits(17, 2);
+    if (year == 0 || hour > 23 || minute > 59 || second > 59)
+        throw std::runtime_error("observed_at calendar/time value out of range");
+    const std::chrono::year_month_day date{std::chrono::year{year},
+        std::chrono::month{static_cast<unsigned>(month)},
+        std::chrono::day{static_cast<unsigned>(day_of_month)}};
+    if (!date.ok()) throw std::runtime_error("observed_at calendar date invalid");
+    std::size_t pos = 19;
+    if (pos < s.size() && s[pos] == '.') {
+        ++pos;
+        const std::size_t fraction_start = pos;
+        while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') ++pos;
+        if (pos == fraction_start) throw std::runtime_error("observed_at fraction must contain digits");
+    }
+    int offset_seconds = 0;
+    if (pos < s.size() && (s[pos] == 'Z' || s[pos] == 'z')) {
+        ++pos;
+    } else if (pos < s.size() && (s[pos] == '+' || s[pos] == '-')) {
+        const int sign = s[pos] == '+' ? 1 : -1;
+        if (pos + 6U != s.size() || s[pos + 3U] != ':')
+            throw std::runtime_error("observed_at offset must be ±HH:MM");
+        const int offset_hour = digits(pos + 1U, 2);
+        const int offset_minute = digits(pos + 4U, 2);
+        if (offset_hour > 23 || offset_minute > 59)
+            throw std::runtime_error("observed_at offset out of range");
+        offset_seconds = sign * (offset_hour * 3600 + offset_minute * 60);
+        pos += 6U;
+    } else {
+        throw std::runtime_error("observed_at timezone required");
+    }
+    if (pos != s.size()) throw std::runtime_error("trailing observed_at data");
+    const auto day = std::chrono::sys_days{date}.time_since_epoch();
+    const auto instant = std::chrono::duration_cast<std::chrono::seconds>(day) +
+        std::chrono::hours{hour} + std::chrono::minutes{minute} +
+        std::chrono::seconds{second - offset_seconds};
+    return instant.count();
+}
+
+bool read_limited_line(std::istream &in, std::string &line,
+                      std::size_t limit = MAX_RECORD_BYTES) {
     line.clear();
     char c = '\0';
     bool consumed = false;
     while (in.get(c)) {
         consumed = true;
         if (c == '\n') return true;
-        if (line.size() == MAX_RECORD_BYTES)
+        if (line.size() == limit)
             throw std::runtime_error("JSON record too large");
         line.push_back(c);
     }
@@ -119,23 +267,47 @@ std::vector<Event> load_events(const std::string &file) {
         try {
             if (!valid_utf8(line)) throw std::runtime_error("invalid UTF-8");
             Value root = bdetect::json::Parser(line).parse();
-            if (required(root, "schema_version").string_or() != "event.v1")
+            if (required_text(root, "schema_version") != "event.v1")
                 throw std::runtime_error("unsupported schema_version");
             Event e;
-            e.id = required(root, "event_id").string_or();
-            e.host = required(root, "host_id").string_or();
-            e.kind = required(root, "kind").string_or();
-            e.observed = required(root, "observed_at").string_or();
+            e.id = required_text(root, "event_id");
+            const std::string source = required_text(root, "source");
+            e.host = required_text(root, "host_id");
+            e.kind = required_text(root, "kind");
+            const std::string severity = required_text(root, "severity");
+            e.observed = required_text(root, "observed_at");
             e.epoch = parse_time(e.observed);
+            e.content_hash = sha256(line);
             const Value &target = required(root, "target");
-            e.path = required(target, "path").string_or();
-            const Value *coverage = root.get("coverage");
-            e.coverage = coverage && coverage->get("state")
-                ? coverage->get("state")->string_or("unknown") : "unknown";
-            if (e.id.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
+            (void)object_value(target, "target");
+            e.path = required_text(target, "path");
+            validate_optional_integer(target, "device");
+            validate_optional_integer(target, "inode");
+            const Value &actor = required(root, "actor");
+            (void)object_value(actor, "actor");
+            validate_nullable_integer(actor, "pid");
+            validate_nullable_integer(actor, "start_time_ticks");
+            const std::string attribution = required_text(actor, "attribution");
+            if (attribution != "unknown" && attribution != "kernel_observed")
+                throw std::runtime_error("invalid actor attribution");
+            (void)object_value(required(root, "evidence"), "evidence");
+            const Value &coverage = required(root, "coverage");
+            (void)object_value(coverage, "coverage");
+            e.coverage = required_text(coverage, "state");
+            if (e.coverage != "healthy" && e.coverage != "degraded" &&
+                e.coverage != "unsupported" && e.coverage != "recovering")
+                throw std::runtime_error("invalid coverage state");
+            if (const Value *reason = coverage.get("reason"); reason &&
+                !std::holds_alternative<std::nullptr_t>(reason->data) &&
+                !std::holds_alternative<std::string>(reason->data))
+                throw std::runtime_error("coverage reason must be string or null");
+            const std::set<std::string> severities = {"info", "low", "medium", "high", "critical"};
+            if (severity.empty() || !severities.contains(severity))
+                throw std::runtime_error("invalid event severity");
+            if (e.id.empty() || source.empty() || e.host.empty() || e.kind.empty() || e.path.empty())
                 throw std::runtime_error("empty required event field");
-            if (e.id.size() > 256U || e.host.size() > 256U || e.kind.size() > 128U ||
-                e.path.size() > 4096U)
+            if (e.id.size() > 256U || source.size() > 128U || e.host.size() > 256U ||
+                e.kind.size() > 128U || e.path.size() > 4096U)
                 throw std::runtime_error("event field length limit");
             if (events.size() == MAX_EVENT_COUNT)
                 throw std::runtime_error("event cardinality limit");
@@ -150,14 +322,32 @@ std::vector<Event> load_events(const std::string &file) {
 Rules load_rules(const std::string &path) {
     std::ifstream in(path);
     if (!in) throw std::runtime_error("cannot open rules");
-    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string content;
+    std::array<char, 4096> buffer{};
+    while (in) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = in.gcount();
+        if (count > 0) {
+            const auto bytes = static_cast<std::size_t>(count);
+            if (bytes > MAX_RECORD_BYTES - content.size())
+                throw std::runtime_error("rules file too large");
+            content.append(buffer.data(), bytes);
+        }
+    }
+    if (in.bad()) throw std::runtime_error("rules read failure");
     Value v = bdetect::json::Parser(content).parse();
     if (required(v, "schema_version").string_or() != "rules.v1")
         throw std::runtime_error("rules schema must be rules.v1");
     Rules r;
-    if (const Value *p = v.get("revision")) r.revision = p->string_or(r.revision);
-    auto integer = [&v](const char *key, int fallback, int low, int high) {
-        const Value *p = v.get(key);
+    r.sha256 = sha256(content);
+    r.revision = required_text(v, "revision");
+    if (r.revision.empty() || r.revision.size() > 128U)
+        throw std::runtime_error("rule revision must be nonempty and bounded");
+    for (const char *field : {"window_seconds", "lateness_tolerance_ms", "max_entities",
+                              "min_event_count", "score_cutoff"})
+        (void)required(v, field);
+    auto integer = [](const Value &object, const char *key, int fallback, int low, int high) {
+        const Value *p = object.get(key);
         if (!p) return fallback;
         const double *number = std::get_if<double>(&p->data);
         if (!number || !std::isfinite(*number) || std::floor(*number) != *number ||
@@ -165,20 +355,40 @@ Rules load_rules(const std::string &path) {
             throw std::runtime_error(std::string("invalid rule integer: ") + key);
         return static_cast<int>(*number);
     };
-    r.window = integer("window_seconds", r.window, 10, 60);
+    r.window = integer(v, "window_seconds", r.window, 10, 60);
     if (r.window != 10 && r.window != 30 && r.window != 60)
         throw std::runtime_error("window_seconds must be 10, 30, or 60");
-    r.lateness_ms = integer("lateness_tolerance_ms", r.lateness_ms, 0, 60000);
-    r.max_entities = integer("max_entities", r.max_entities, 1, 100000);
-    r.min_events = integer("min_event_count", r.min_events, 1, 100000);
-    r.cutoff = integer("score_cutoff", r.cutoff, 1, 1000);
-    r.rewrite = integer("rewrite_threshold", r.rewrite, 1, 100000);
-    r.rename = integer("rename_threshold", r.rename, 1, 100000);
-    r.deletion = integer("delete_threshold", r.deletion, 1, 100000);
-    r.extension_types = integer("extension_types_threshold", r.extension_types, 1, 100000);
-    if (r.min_events < 1 || r.min_events > 100000 ||
-        r.cutoff < 1 || r.cutoff > 1000 || r.rewrite < 1 || r.rename < 1 || r.deletion < 1)
-        throw std::runtime_error("rules threshold out of range");
+    r.lateness_ms = integer(v, "lateness_tolerance_ms", r.lateness_ms, 0, 60000);
+    r.max_entities = integer(v, "max_entities", r.max_entities, 1, 100000);
+    r.min_events = integer(v, "min_event_count", r.min_events, 1, 100000);
+    r.cutoff = integer(v, "score_cutoff", r.cutoff, 1, 1000000);
+    const Value *rule_values = v.get("rules");
+    const auto *rule_array = rule_values ? std::get_if<bdetect::json::Array>(&rule_values->data) : nullptr;
+    if (!rule_array || rule_array->empty() || rule_array->size() > 256U)
+        throw std::runtime_error("rules must contain 1 to 256 rule objects");
+    const std::set<std::string> features = {
+        "event_count", "unique_modified_files", "unique_renamed_files",
+        "unique_deleted_files", "unique_extension_types"
+    };
+    const std::set<std::string> operators = {">=", ">", "<=", "<", "=="};
+    std::set<std::string> ids;
+    for (const Value &entry : *rule_array) {
+        Rule rule;
+        (void)required(entry, "threshold");
+        (void)required(entry, "weight");
+        (void)required(entry, "min_sample_count");
+        rule.id = required(entry, "id").string_or();
+        rule.feature = required(entry, "feature").string_or();
+        rule.op = required(entry, "operator").string_or();
+        rule.threshold = integer(entry, "threshold", 0, 0, 1000000);
+        rule.weight = integer(entry, "weight", -1, 0, 100000);
+        rule.min_samples = integer(entry, "min_sample_count", r.min_events, 1, 100000);
+        if (rule.id.empty() || rule.id.size() > 128U || !ids.insert(rule.id).second)
+            throw std::runtime_error("rule IDs must be nonempty, bounded, and unique");
+        if (!features.contains(rule.feature)) throw std::runtime_error("unsupported rule feature: " + rule.feature);
+        if (!operators.contains(rule.op)) throw std::runtime_error("unsupported rule operator: " + rule.op);
+        r.rules.push_back(std::move(rule));
+    }
     return r;
 }
 
@@ -190,8 +400,7 @@ void add_issue(IntakeIssues &issues, const std::string &host, const std::string 
 }
 
 bool same_event(const Event &a, const Event &b) {
-    return a.host == b.host && a.kind == b.kind && a.path == b.path &&
-           a.observed == b.observed && a.coverage == b.coverage;
+    return a.content_hash == b.content_hash;
 }
 
 std::vector<Event> normalize_events(const std::vector<Event> &input, const Rules &r,
@@ -235,6 +444,32 @@ std::vector<Event> normalize_events(const std::vector<Event> &input, const Rules
     return accepted;
 }
 
+void pace_replay(const std::vector<Event> &events, double speed) {
+    if (!std::isfinite(speed) || speed < 0.0 || speed > 100000.0)
+        throw std::runtime_error("replay speed must be between 0 and 100000");
+    if (speed == 0.0 || events.empty()) return;
+    using Clock = std::chrono::steady_clock;
+    std::vector<const Event *> timeline;
+    timeline.reserve(events.size());
+    for (const Event &event : events) timeline.push_back(&event);
+    std::stable_sort(timeline.begin(), timeline.end(), [](const Event *a, const Event *b) {
+        if (a->epoch != b->epoch) return a->epoch < b->epoch;
+        if (a->host != b->host) return a->host < b->host;
+        return a->id < b->id;
+    });
+    const double total_elapsed = static_cast<double>(timeline.back()->epoch - timeline.front()->epoch) / speed;
+    if (!std::isfinite(total_elapsed) || total_elapsed > 3600.0)
+        throw std::runtime_error("paced replay duration exceeds one hour");
+    const auto origin = Clock::now();
+    const std::int64_t first_event_time = timeline.front()->epoch;
+    for (const Event *event : timeline) {
+        const double elapsed = static_cast<double>(event->epoch - first_event_time) / speed;
+        const auto deadline = origin + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(elapsed));
+        std::this_thread::sleep_until(deadline);
+    }
+}
+
 std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
                                const IntakeIssues &issues) {
     std::map<std::string, std::vector<const Event *>> by_host;
@@ -256,18 +491,31 @@ std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
             d.end = std::to_string(end);
             d.id = "decision-" + std::to_string(out.size() + 1U) + "-" + d.host;
             std::set<std::string> modified, renamed, deleted, extensions, ids;
+            std::map<std::string, std::set<std::string>> feature_event_ids;
             bool degraded = false;
             for (std::size_t i = left; i < right; ++i) {
                 const Event *e = host_events[i];
                 ids.insert(e->id);
+                feature_event_ids["event_count"].insert(e->id);
                 if (e->coverage != "healthy" && e->coverage != "observed") degraded = true;
-                if (e->kind == "file.modified") modified.insert(e->path);
-                if (e->kind == "path.renamed" || e->kind == "file.renamed" || e->kind == "file.moved_to") renamed.insert(e->path);
-                if (e->kind == "file.deleted") deleted.insert(e->path);
+                if (e->kind == "file.modified") {
+                    modified.insert(e->path);
+                    feature_event_ids["unique_modified_files"].insert(e->id);
+                }
+                if (e->kind == "path.renamed" || e->kind == "file.renamed" || e->kind == "file.moved_to") {
+                    renamed.insert(e->path);
+                    feature_event_ids["unique_renamed_files"].insert(e->id);
+                }
+                if (e->kind == "file.deleted") {
+                    deleted.insert(e->path);
+                    feature_event_ids["unique_deleted_files"].insert(e->id);
+                }
                 std::size_t slash = e->path.find_last_of('/');
                 std::size_t dot = e->path.find_last_of('.');
-                if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+                if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
                     extensions.insert(e->path.substr(dot));
+                    feature_event_ids["unique_extension_types"].insert(e->id);
+                }
             }
             d.event_ids.assign(ids.begin(), ids.end());
             auto host_issue = issues.find(host);
@@ -280,19 +528,37 @@ std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
             } else if (count < static_cast<std::size_t>(r.min_events)) {
                 d.label = "unknown"; d.unknown.push_back("insufficient_events");
             } else {
-                if (modified.size() >= static_cast<std::size_t>(r.rewrite)) {
-                    d.score += 60; d.reasons.push_back("R-MASS-REWRITE");
+                const std::map<std::string, int> feature_values = {
+                    {"event_count", static_cast<int>(count)},
+                    {"unique_modified_files", static_cast<int>(modified.size())},
+                    {"unique_renamed_files", static_cast<int>(renamed.size())},
+                    {"unique_deleted_files", static_cast<int>(deleted.size())},
+                    {"unique_extension_types", static_cast<int>(extensions.size())}
+                };
+                for (const Rule &rule : r.rules) {
+                    if (count < static_cast<std::size_t>(rule.min_samples)) {
+                        d.unknown.push_back("insufficient_sample_count:" + rule.id);
+                        continue;
+                    }
+                    const int observed = feature_values.at(rule.feature);
+                    bool matched = false;
+                    if (rule.op == ">=") matched = observed >= rule.threshold;
+                    else if (rule.op == ">") matched = observed > rule.threshold;
+                    else if (rule.op == "<=") matched = observed <= rule.threshold;
+                    else if (rule.op == "<") matched = observed < rule.threshold;
+                    else if (rule.op == "==") matched = observed == rule.threshold;
+                    if (matched) {
+                        d.score += rule.weight;
+                        Reason reason{rule.id, rule.feature, rule.op, observed,
+                                      rule.threshold, rule.weight, rule.weight, {}};
+                        const auto evidence = feature_event_ids.find(rule.feature);
+                        if (evidence != feature_event_ids.end())
+                            reason.source_event_ids.assign(evidence->second.begin(), evidence->second.end());
+                        d.reasons.push_back(std::move(reason));
+                    }
                 }
-                if (renamed.size() >= static_cast<std::size_t>(r.rename)) {
-                    d.score += 60; d.reasons.push_back("R-MASS-RENAME");
-                }
-                if (deleted.size() >= static_cast<std::size_t>(r.deletion)) {
-                    d.score += 60; d.reasons.push_back("R-MASS-DELETE");
-                }
-                if (extensions.size() >= static_cast<std::size_t>(r.extension_types)) {
-                    d.score += 20; d.reasons.push_back("R-EXTENSION-DIVERSITY");
-                }
-                d.label = d.score >= r.cutoff ? "suspicious" : "benign";
+                d.label = d.unknown.empty() && d.score >= r.cutoff ? "suspicious" :
+                          d.unknown.empty() ? "benign" : "unknown";
             }
             out.push_back(std::move(d));
         }
@@ -300,17 +566,43 @@ std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
     return out;
 }
 
-void write_decisions(const std::string &path, const std::vector<Decision> &ds, const Rules &r) {
+void write_decisions(const std::string &path, const std::vector<Decision> &ds,
+                     const Rules &r, const std::string &dataset_hash) {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot open output");
     for (const auto &d : ds) {
+        std::size_t estimate = 1024U;
+        auto account_string = [&estimate](const std::string &value) {
+            const std::size_t encoded = encoded_string_size(value);
+            if (estimate > MAX_DECISION_RECORD_BYTES - 4U ||
+                encoded > MAX_DECISION_RECORD_BYTES - estimate - 4U)
+                throw std::runtime_error("decision record exceeds output limit");
+            estimate += encoded + 4U;
+        };
+        account_string(d.id);
+        account_string(d.host);
+        account_string(r.revision);
+        account_string(r.sha256);
+        account_string(dataset_hash);
+        for (const auto &id : d.event_ids) account_string(id);
+        for (const auto &unknown : d.unknown) account_string(unknown);
+        for (const Reason &reason : d.reasons) {
+            if (estimate > MAX_DECISION_RECORD_BYTES - 512U)
+                throw std::runtime_error("decision record exceeds output limit");
+            estimate += 512U;
+            account_string(reason.rule_id);
+            account_string(reason.feature);
+            account_string(reason.op);
+            for (const auto &id : reason.source_event_ids) account_string(id);
+        }
         const bool degraded = std::any_of(d.unknown.begin(), d.unknown.end(),
             [](const std::string &reason) { return reason != "insufficient_events"; });
         out << "{\"schema_version\":\"decision.v1\",\"decision_id\":\"" << escape(d.id)
             << "\",\"ruleset_revision\":\"" << escape(r.revision) << "\",\"entity_key\":\""
             << escape(d.host) << "\",\"window_start\":\"" << d.start << "\",\"window_end\":\""
             << d.end << "\",\"score\":" << d.score << ",\"decision\":\"" << d.label
-            << "\",\"simulation_only\":true,\"coverage\":\""
+            << "\",\"simulation_only\":true,\"ruleset_sha256\":\"" << r.sha256
+            << "\",\"dataset_sha256\":\"" << dataset_hash << "\",\"coverage\":\""
             << (degraded ? "degraded" : "observed") << "\",\"source_event_ids\":[";
         for (std::size_t i = 0; i < d.event_ids.size(); ++i) {
             if (i) out << ',';
@@ -319,7 +611,20 @@ void write_decisions(const std::string &path, const std::vector<Decision> &ds, c
         out << "],\"reasons\":[";
         for (std::size_t i = 0; i < d.reasons.size(); ++i) {
             if (i) out << ',';
-            out << '"' << d.reasons[i] << '"';
+            const Reason &reason = d.reasons[i];
+            out << "{\"rule_id\":\"" << escape(reason.rule_id)
+                << "\",\"feature\":\"" << escape(reason.feature)
+                << "\",\"observed\":" << reason.observed
+                << ",\"operator\":\"" << escape(reason.op)
+                << "\",\"threshold\":" << reason.threshold
+                << ",\"weight\":" << reason.weight
+                << ",\"contribution\":" << reason.contribution
+                << ",\"source_event_ids\":[";
+            for (std::size_t j = 0; j < reason.source_event_ids.size(); ++j) {
+                if (j) out << ',';
+                out << '"' << escape(reason.source_event_ids[j]) << '"';
+            }
+            out << "]}";
         }
         out << "],\"unknown_fields\":[";
         for (std::size_t i = 0; i < d.unknown.size(); ++i) {
@@ -341,34 +646,60 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
     std::ifstream l(labels_path);
     if (!l) throw std::runtime_error("cannot open labels");
     std::string line;
-    while (std::getline(l, line)) {
+    std::size_t label_line = 0;
+    while (read_limited_line(l, line)) {
+        ++label_line;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line.rfind("entity_key,", 0) == 0) continue;
         auto comma = line.find(',');
-        if (comma == std::string::npos) throw std::runtime_error("bad labels CSV");
-        labels[line.substr(0, comma)] = line.substr(comma + 1);
+        if (comma == std::string::npos || line.find(',', comma + 1U) != std::string::npos)
+            throw std::runtime_error("bad labels CSV at line " + std::to_string(label_line) +
+                                     "; quoted or multi-column fields unsupported");
+        const std::string key = line.substr(0, comma);
+        const std::string label = line.substr(comma + 1U);
+        if (key.empty() || (label != "benign" && label != "suspicious"))
+            throw std::runtime_error("invalid label row");
+        if (!labels.emplace(key, label).second) throw std::runtime_error("duplicate entity label");
     }
     std::ifstream p(pred_path);
     if (!p) throw std::runtime_error("cannot open predictions");
     int tp=0, fp=0, tn=0, fn=0, unknown=0;
-    while (std::getline(p, line)) {
-        Value v = bdetect::json::Parser(line).parse();
-        std::string key = required(v, "entity_key").string_or();
-        std::string pred = required(v, "decision").string_or();
+    std::set<std::string> seen_entities;
+    std::size_t prediction_line = 0;
+    while (read_limited_line(p, line, MAX_DECISION_RECORD_BYTES)) {
+        ++prediction_line;
+        if (line.empty()) continue;
+        Value v = bdetect::json::Parser(line, MAX_DECISION_RECORD_BYTES).parse();
+        std::string key = required_text(v, "entity_key");
+        std::string pred = required_text(v, "decision");
         auto it = labels.find(key);
-        if (it == labels.end()) throw std::runtime_error("missing label for " + key);
+        if (it == labels.end())
+            throw std::runtime_error("missing label for prediction line " +
+                                     std::to_string(prediction_line) + ": " + key);
+        seen_entities.insert(key);
+        if (pred != "benign" && pred != "suspicious" && pred != "unknown")
+            throw std::runtime_error("invalid prediction label: " + pred);
         if (pred == "unknown") { ++unknown; continue; }
         bool actual = it->second == "suspicious";
         bool detected = pred == "suspicious";
         if (actual && detected) ++tp; else if (actual) ++fn;
         else if (detected) ++fp; else ++tn;
     }
+    for (const auto &[key, label] : labels) {
+        (void)label;
+        if (!seen_entities.contains(key)) throw std::runtime_error("label has no prediction for " + key);
+    }
     auto metric = [](int n, int d) { return d ? std::to_string(static_cast<double>(n) / d) : "N/A"; };
     std::ofstream out(report);
     if (!out) throw std::runtime_error("cannot write report");
     out << "{\"tp\":"<<tp<<",\"fp\":"<<fp<<",\"tn\":"<<tn<<",\"fn\":"<<fn
-        <<",\"unknown\":"<<unknown<<",\"precision\":\""<<metric(tp,tp+fp)
-        <<"\",\"recall\":\""<<metric(tp,tp+fn)<<"\",\"fpr\":\""<<metric(fp,fp+tn)
-        <<"\",\"fnr\":\""<<metric(fn,fn+tp)<<"\"}\n";
+        <<",\"unknown\":"<<unknown<<",\"total_predictions\":"<<(tp+fp+tn+fn+unknown)
+        <<",\"precision\":\""<<metric(tp,tp+fp)<<"\",\"precision_numerator\":"<<tp
+        <<",\"precision_denominator\":"<<(tp+fp)<<",\"recall\":\""<<metric(tp,tp+fn)
+        <<"\",\"recall_numerator\":"<<tp<<",\"recall_denominator\":"<<(tp+fn)
+        <<",\"fpr\":\""<<metric(fp,fp+tn)<<"\",\"fpr_numerator\":"<<fp
+        <<",\"fpr_denominator\":"<<(fp+tn)<<",\"fnr\":\""<<metric(fn,fn+tp)
+        <<"\",\"fnr_numerator\":"<<fn<<",\"fnr_denominator\":"<<(fn+tp)<<"}\n";
 }
 
 void generate_fixtures(const std::string &outdir, const std::string &root) {
@@ -396,17 +727,31 @@ void generate_fixtures(const std::string &outdir, const std::string &root) {
         std::string host = name;
         std::ofstream file(std::string(out_real) + "/" + name + ".ndjson");
         int count = category == "normal" ? 12 : 50;
-        std::string kind = name == "mass-rename" ? "file.renamed" :
-                           name == "mass-delete" ? "file.deleted" : "file.modified";
         for (int i = 0; i < count; ++i) {
+            std::string kind = "file.modified";
+            if (name == "backup") kind = "file.read";
+            else if (name == "compiler-build") kind = i < 8 ? "file.created" : "file.modified";
+            else if (name == "git-checkout")
+                kind = i < 5 ? "file.created" : i < 10 ? "file.modified" : "file.deleted";
+            else if (name == "package-install") kind = i < 10 ? "file.created" : "file.modified";
+            else if (name == "archive") kind = i < 8 ? "file.created" : "file.modified";
+            else if (name == "ide-save") kind = "file.modified";
+            else if (name == "sync") kind = i < 5 ? "file.created" : i < 10 ? "file.modified" : "file.renamed";
+            else if (name == "log-rotation")
+                kind = i == 0 ? "file.renamed" : i == 1 ? "file.deleted" : "file.created";
+            else if (name == "mass-rename") kind = "file.renamed";
+            else if (name == "mass-delete") kind = "file.deleted";
+            else if (name == "mixed-burst")
+                kind = i < 40 ? "file.modified" : i < 45 ? "file.renamed" : "file.deleted";
             const char *ts = "2026-10-09T12:00:00Z";
-            std::string path = "/sandbox/" + name + "/item" + std::to_string(i) +
-                               (i % 2 ? ".dat" : ".txt");
+            const std::string item = name == "ide-save" ? "document" : "item" + std::to_string(i);
+            std::string path = "/sandbox/" + name + "/" + item +
+                               (name == "ide-save" ? ".txt" : i % 2 ? ".dat" : ".txt");
             file << "{\"schema_version\":\"event.v1\",\"event_id\":\"" << name << "-"
                  << i << "\",\"source\":\"fixture\",\"host_id\":\"" << host
                  << "\",\"observed_at\":\"" << ts << "\",\"kind\":\"" << kind
                  << "\",\"severity\":\"info\",\"target\":{\"path\":\"" << path
-                 << "\"},\"actor\":{\"pid\":null,\"attribution\":\"unknown\"},"
+                 << "\"},\"actor\":{\"pid\":null,\"start_time_ticks\":null,\"attribution\":\"unknown\"},"
                     "\"evidence\":{},\"coverage\":{\"state\":\"healthy\"}}\n";
         }
         labels << host << ',' << (category == "normal" ? "benign" : "suspicious") << '\n';
@@ -423,7 +768,7 @@ static std::string arg(int argc, char **argv, const std::string &name, const std
 int main(int argc, char **argv) {
     try {
         if (argc < 2 || std::string(argv[1]) == "--help") {
-            std::cout << "bdetect replay --input FILE --rules FILE --out FILE\n"
+            std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER]\n"
                          "bdetect evaluate --pred FILE --labels CSV --report FILE\n"
                          "bdetect rules-validate --file FILE\n"
                          "bdetect generate-fixtures --root SANDBOX --out NEW-DIR\n"
@@ -438,11 +783,22 @@ int main(int argc, char **argv) {
             generate_fixtures(arg(argc, argv, "--out"), arg(argc, argv, "--root"));
         } else if (command == "replay") {
             Rules rules = load_rules(arg(argc, argv, "--rules"));
-            auto input_events = load_events(arg(argc, argv, "--input"));
+            const std::string input_path = arg(argc, argv, "--input");
+            const std::string dataset_hash = sha256_file(input_path);
+            auto input_events = load_events(input_path);
+            if (sha256_file(input_path) != dataset_hash)
+                throw std::runtime_error("input changed while replay was loading");
             IntakeIssues issues;
             auto events = normalize_events(input_events, rules, issues);
+            std::size_t speed_bytes = 0;
+            const std::string speed_arg = arg(argc, argv, "--speed", "0");
+            double speed = 0.0;
+            try { speed = std::stod(speed_arg, &speed_bytes); }
+            catch (...) { throw std::runtime_error("invalid replay speed"); }
+            if (speed_bytes != speed_arg.size()) throw std::runtime_error("invalid replay speed");
+            pace_replay(events, speed);
             auto decisions = evaluate(events, rules, issues);
-            write_decisions(arg(argc, argv, "--out"), decisions, rules);
+            write_decisions(arg(argc, argv, "--out"), decisions, rules, dataset_hash);
             std::cout << "decisions=" << decisions.size() << " simulation_only=true\n";
         } else if (command == "evaluate") {
             evaluate_labels(arg(argc, argv, "--pred"), arg(argc, argv, "--labels"),
@@ -452,8 +808,8 @@ int main(int argc, char **argv) {
             std::ifstream in(arg(argc, argv, "--input"));
             if (!in) throw std::runtime_error("cannot open decisions");
             std::string line; bool found=false;
-            while (std::getline(in,line)) {
-                Value v=bdetect::json::Parser(line).parse();
+            while (read_limited_line(in, line, MAX_DECISION_RECORD_BYTES)) {
+                Value v=bdetect::json::Parser(line, MAX_DECISION_RECORD_BYTES).parse();
                 if (required(v,"decision_id").string_or()==wanted) { std::cout<<line<<'\n'; found=true; break; }
             }
             if (!found) throw std::runtime_error("decision ID not found");

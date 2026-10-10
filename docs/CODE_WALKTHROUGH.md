@@ -1,33 +1,33 @@
 # Code Walkthrough — Linux Ransomware Behavior Detection Lab
 
-## 1. CLI dispatch
+## 1. CLI and input evidence
 
-`main` in `src/bdetect.cpp` reads `argv[1]` and dispatches each operation. `replay` imports events and rules before writing decisions; `evaluate` reads predictions and labels; `generate-fixtures` is restricted to a newly created output directory beneath a preexisting sandbox. Exceptions are caught at the top and return status 2.
+`main` dispatches each command and catches exceptions at the process boundary, returning status 2 on failure. In `replay`, `load_rules` reads up to 1 MiB of JSON, validates the rules.v1 contract, and computes a SHA-256 digest through OpenSSL EVP. The input dataset is hashed before and after parsing; a byte change during loading aborts the run.
 
-## 2. Event parsing
+`load_events` reads bounded newline records, verifies UTF-8 and required event.v1 fields, parses an RFC 3339 observation time with an explicit timezone, and copies only the event ID, host, kind, path, timestamp, and coverage. Offsets normalize to UTC seconds; a fractional part is accepted but not retained, so window ordering has one-second precision. It caps record bytes, field sizes, and total event count. It intentionally does not infer a process actor.
 
-`load_events` uses `read_limited_line` to read at most 1 MiB per record before adding another byte, then `valid_utf8` rejects malformed UTF-8 before parsing. `bdetect::json::Parser` in `include/bdetect/json.hpp` builds a value tree from owned `std::string`, `std::map`, and `std::vector` values. It rejects duplicate object keys, control bytes, invalid escapes, unsupported Unicode surrogate escapes, nesting beyond 32, and JSON text larger than 1 MiB. The importer also applies explicit length limits to event IDs, host IDs, kinds, and paths.
+## 2. Rule validation
 
-`required` enforces presence; `string_or` extracts expected strings. `parse_time` converts an ISO-like timestamp to epoch seconds through `timegm`. The importer retains event ID, host ID, kind, path, timestamp, and coverage. Any exception gains line context.
+`Rule` stores `id`, `feature`, `op`, `threshold`, `weight`, and `min_samples`. `load_rules` allows a bounded number of unique rule IDs, a fixed feature vocabulary, five comparison operators, and integer bounds. Invalid rules are rejected before event scoring. The digest is over the exact file bytes, so whitespace edits also change `ruleset_sha256`.
 
-## 3. Rules and aggregation
+## 3. Normalization and replay time
 
-`load_rules` requires `schema_version=rules.v1`, reads window size, lateness tolerance, host bound, minimum sample count, thresholds, and score cutoff, then validates integer ranges and limits the window to 10, 30, or 60 seconds. `normalize_events` removes exact duplicate IDs, marks conflicting IDs, drops per-host events that arrive later than the configured tolerance, checks host cardinality, and sorts the accepted copy by host, event time, then ID.
+`normalize_events` uses IDs to remove exact raw-record retransmissions. A reused ID with different bytes—including formatting-only changes—is conservatively treated as conflicting evidence; a late event also adds a host-level unknown condition. Accepted events are sorted by host, event second, then ID. No producer sequence is present in event.v1 today, so a missing source record cannot be proven.
 
-`evaluate` visits each distinct event timestamp for a host as a window endpoint. A moving left index skips events older than `endpoint - window_seconds`; the remaining range is the current sliding window. Sets count unique modified/renamed/deleted paths, extensions, and source event IDs. Unknown/degraded coverage, conflicting IDs, late events, or insufficient sample count yields `unknown`; otherwise threshold checks add the current named contributions and the score cutoff selects benign or suspicious.
+`pace_replay` is optional. It orders event pointers globally and maps event-time offsets to `steady_clock` deadlines. `--speed 0` skips waits; positive values replay at the requested event-time multiple, with a one-hour maximum scheduled wait. The scorer still uses event time only, so fast and paced runs should produce identical bytes. This is a paced offline timeline, not a streaming service that emits live decisions.
 
-This is intentionally easy to inspect, not a general rule DSL. Replay is offline rather than paced by a monotonic clock; out-of-tolerance events are excluded and lower that host's decisions to unknown. Missing records cannot be detected without source sequence metadata. Some configured weights remain unused.
+## 4. Window feature scoring
 
-## 4. Output and metrics
+`evaluate` groups stable pointers by host, then advances a left index across each host's sorted timeline. Each distinct event second is an endpoint; the active interval is `[end - window_seconds, end]`. Sets calculate unique modified/renamed/deleted paths and extensions. For every rule with enough samples, the engine compares its feature value using the configured operator. A match adds its weight to the score and creates a structured reason with observed value, operator, threshold, weight, contribution, and the exact event IDs that fed that feature. Any degraded evidence or insufficient required samples yields unknown.
 
-`write_decisions` serializes the window, score, classification, rules revision, coverage, event IDs, reason IDs, and unknown fields. `simulation_only` is always true. The local escaping helper handles common JSON escapes but is not a full canonical serializer.
+## 5. Output and metrics
 
-`evaluate_labels` maps each `entity_key` to a CSV label, counts TP/FP/TN/FN/unknown, and emits precision/recall/FPR/FNR with `N/A` for a zero denominator. `explain` scans serialized decisions for the requested ID. The metric report does not yet include every denominator or robust multi-column CSV handling.
+`write_decisions` writes decision.v1 JSONL with exact input/rule hashes, revision, source event IDs, event-time window, score, structured reasons, unknown fields, coverage, and `simulation_only=true`. `evaluate_labels` joins by entity key and reports TP/FP/TN/FN/unknown with rates that use `N/A` for zero denominators. Label parsing is currently intentionally simple and does not yet support quoted CSV fields or reject every label-set mismatch.
 
-## 5. Synthetic fixture generation
+`explain` scans a decision file for an ID and prints that serialized record. It does not recompute or validate the underlying hashes.
 
-`generate_fixtures` resolves the sandbox, creates a new output directory with restrictive mode, checks that it is beneath the sandbox, then writes eight benign and four synthetic suspicious event streams plus `labels.csv`. It emits metadata only and never creates or alters workload files. The smoke test validates, replays, concatenates, and evaluates these outputs.
+## 6. Fixture sandbox and lifetimes
 
-## 6. Memory and resource review
+`generate_fixtures` requires a pre-existing root and a new output directory, then verifies the resolved output is beneath the root before writing synthetic event streams and labels. It creates event metadata, not file workloads. File streams and OpenSSL contexts are RAII-managed.
 
-`load_events` stores the entire corpus in memory; normalization creates a second owning vector. `evaluate` uses non-owning `Event*` pointers into that stable normalized vector and copies unique path strings into per-window sets. Streams are RAII-managed. There are no worker threads; bounded streaming backpressure is not implemented.
+The input vector owns strings; normalization creates a second owning vector. `string_view` indexes refer to the first vector, and the evaluator's pointers refer to the normalized vector. Both containers must remain unmodified and alive while those indexes/pointers are used. This batch design can use memory proportional to the entire corpus; streaming retention, bounded output windows, and TTL eviction are not implemented.

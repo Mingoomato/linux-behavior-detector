@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Behavior event v1",
+  "type": "object",
+  "required": ["schema_version", "event_id", "source", "host_id", "observed_at", "kind", "severity", "target", "actor", "evidence", "coverage"],
+  "properties": {
+    "schema_version": {"const": "event.v1"},
+    "event_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "source": {"type": "string", "minLength": 1, "maxLength": 128},
+    "host_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+    "severity": {"enum": ["info", "low", "medium", "high", "critical"]},
+    "target": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "actor": {
+      "type": "object",
+      "required": ["pid", "start_time_ticks", "attribution"],
+      "properties": {
+        "pid": {"type": ["integer", "null"], "minimum": 0},
+        "start_time_ticks": {"type": ["integer", "null"], "minimum": 0},
+        "attribution": {"enum": ["unknown", "kernel_observed"]}
+      },
+      "additionalProperties": true
+    },
+    "evidence": {"type": "object"},
+    "coverage": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": {"enum": ["healthy", "degraded", "unsupported", "recovering"]},
+        "reason": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

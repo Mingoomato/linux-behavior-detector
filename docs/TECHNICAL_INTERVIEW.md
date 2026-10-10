@@ -1,39 +1,47 @@
 # Technical Defense — Linux Ransomware Behavior Detection Lab
 
-Questions only; no answer key is included. Defend each decision with source and test evidence, then state limitations and alternatives.
+Questions only; no answer key is provided. Use the source, synthetic evidence, and test output to defend each response. State uncertainty and limitations explicitly.
 
 ## Code reading and data flow
 
-1. Trace one JSONL record from `load_events` into a decision. Which fields are required and which are optional?
-2. What guarantees does `Parser` in `json.hpp` provide about duplicate keys, nesting, string escapes, and input size?
-3. Explain how `parse_time` converts the timestamp and what validation is missing.
-4. How does `evaluate` choose each sliding-window endpoint and advance its left boundary? Which sets determine unique feature counts?
-5. Why are pointers in the window map valid during evaluation? What change could invalidate them?
-6. Which conditions force `unknown`, and why is that safer than benign?
-7. What information does `write_decisions` preserve? What does `simulation_only` mean?
+1. Trace one event line from `read_limited_line` through `load_events` and `normalize_events` to the decision that references its ID.
+2. Which event fields are required by the importer, which are copied into `Event`, and which are intentionally ignored?
+3. What guarantees and limitations does `bdetect::json::Parser` have around duplicate keys, nesting, UTF-8, Unicode escapes, and numeric parsing?
+4. How does `parse_time` currently interpret timestamps, and which valid RFC 3339 values or invalid calendar inputs does it mishandle?
+5. Explain how `normalize_events` treats an exact duplicate ID, a conflicting duplicate ID, and an event outside the lateness tolerance.
+6. How are the sliding window's left/right boundaries chosen, and why is the window inclusive at its end?
+7. Which feature sets feed each available rule feature? How does the rule's operator and minimum sample count affect a decision?
+8. Reconstruct a decision score from `reasons[]`. What evidence would you need to verify the final `score_cutoff` result?
+9. Why are the non-owning `string_view` indexes and event pointers valid during normalization/evaluation? What mutation could invalidate them?
+10. How is the decision ID formed, and what collision or stability properties does that scheme have?
 
-## Debugging and metrics
+## Debugging and verification
 
-8. How does `normalize_events` treat an exact duplicate ID versus a conflicting duplicate, and how does each affect the minimum sample count?
-9. What happens when an event falls outside the lateness tolerance? Why can a missing source record still be invisible?
-10. Which denominator and label-validation checks should accompany TP/FP/TN/FN and `N/A` rates?
-11. How would you reproduce deterministic replay and compare outputs while ignoring non-semantic metadata?
-12. What happens when an input line exceeds the parser cap, and when may memory already have been allocated?
+11. A replay with `--speed 10` takes longer but produces different decisions. Which event-time and monotonic-time paths would you inspect first?
+12. How can a test prove that configured rule weights affect both score and explanation rather than only output metadata?
+13. What exact bytes do `ruleset_sha256` and `dataset_sha256` cover? What does the before/after input hash check detect, and what does it not detect?
+14. What conditions lead to `unknown`, and could any currently produce a misleading `coverage=observed` value?
+15. How would you add producer sequence-gap detection without marking sources that lack sequence metadata as degraded?
+16. How would you test 10-, 30-, and 60-second boundary cases, including an event exactly at the left edge?
+17. What happens on an oversized line, a line with invalid UTF-8, an invalid rule operator, or a missing output directory?
+18. Why can one million accepted records still exceed a practical memory budget? Which structures duplicate or retain the data?
 
 ## Security and evaluation validity
 
-13. Why must unknown actor attribution remain unknown rather than correlate nearby PIDs?
-14. Which fields can contain personal data, and where are they emitted today?
-15. Why do fixture metrics not estimate real-world ransomware detection efficacy?
-16. How should degraded coverage and event-order loss affect a decision?
-17. What threat is reduced by requiring generated fixtures beneath a sandbox root, and what path races remain?
+19. Why is correlating an event to a nearby PID unsafe when the upstream source does not attest process identity?
+20. Which emitted fields may contain personal information, and how would pseudonymization change the ability to investigate a result?
+21. What security properties does placing generated fixtures under a sandbox root provide? Which time-of-check/time-of-use or partial-write risks remain?
+22. Why are generated fixture TP/FP/TN/FN counts a pipeline check rather than a real-world efficacy estimate?
+23. How should conflicting IDs, late evidence, and unhealthy coverage influence both `decision` and `coverage` output?
+24. What can a SHA-256 digest establish, and why is it not by itself proof of an untampered dataset history or honest labels?
 
 ## Design tradeoffs
 
-18. Compare fixed UTC buckets, rolling event-time windows, and a watermark-based streaming design.
-19. How would rule objects with ID/operator/threshold/weight/minimum count improve auditability? What validation risks follow?
-20. How can development and holdout fixtures be separated and frozen to avoid tuning leakage?
-21. When might inotify, fanotify, or eBPF be appropriate upstream, and what coverage limits accompany them?
-22. Which next gate would reduce uncertainty most: parser fuzzing, late-event replay, dataset hashing, or a 100k-event resource test?
+25. Compare the current whole-corpus batch normalizer with a bounded streaming watermark and queue. What late-event contract would streaming require?
+26. Compare fast offline replay, a paced monotonic timeline, and a fully virtual clock. Which should be used for deterministic tests and why?
+27. What would a frozen development/holdout manifest need to record to avoid tuning leakage? Where would the rule hash fit?
+28. When could inotify, fanotify, or eBPF be a useful upstream source, and what coverage, privilege, or attribution limits would remain?
+29. Which change would most reduce uncertainty before claiming research value: timestamp validation, source sequence gaps, parser fuzzing, independent data, or 100k resource measurement? Defend your ordering.
+30. What alternative rule or statistical model could represent interactions between features, and what data and calibration evidence would it require?
 
-Owner mastery is not inferred from an automated smoke test; it requires direct evidence such as an independent exercise implementation and a reasoned defense.
+Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

@@ -2,16 +2,36 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Behavior decision v1",
   "type": "object",
-  "required": ["schema_version", "decision_id", "ruleset_revision", "entity_key", "score", "decision", "simulation_only", "source_event_ids"],
+  "required": ["schema_version", "decision_id", "ruleset_revision", "ruleset_sha256", "dataset_sha256", "entity_key", "score", "decision", "simulation_only", "source_event_ids", "reasons", "unknown_fields"],
   "properties": {
     "schema_version": {"const": "decision.v1"},
     "decision_id": {"type": "string"},
     "ruleset_revision": {"type": "string"},
+    "ruleset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "dataset_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "entity_key": {"type": "string"},
     "score": {"type": "integer", "minimum": 0},
     "decision": {"enum": ["benign", "suspicious", "unknown"]},
     "simulation_only": {"const": true},
     "source_event_ids": {"type": "array", "items": {"type": "string"}},
-    "reasons": {"type": "array", "items": {"type": "string"}}
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "feature", "observed", "operator", "threshold", "weight", "contribution", "source_event_ids"],
+        "properties": {
+          "rule_id": {"type": "string"},
+          "feature": {"type": "string"},
+          "observed": {"type": "integer"},
+          "operator": {"enum": [">=", ">", "<=", "<", "=="]},
+          "threshold": {"type": "integer"},
+          "weight": {"type": "integer"},
+          "contribution": {"type": "integer"},
+          "source_event_ids": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "unknown_fields": {"type": "array", "items": {"type": "string"}}
   }
 }

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <map>
 #include <stdexcept>
@@ -35,8 +36,8 @@ struct Value {
 
 class Parser {
 public:
-    explicit Parser(const std::string &input) : input_(input) {
-        if (input.size() > 1024U * 1024U) throw std::runtime_error("JSON record too large");
+    explicit Parser(const std::string &input, std::size_t max_bytes = 1024U * 1024U) : input_(input) {
+        if (input.size() > max_bytes) throw std::runtime_error("JSON record too large");
     }
     Value parse() {
         Value v = value(0);
@@ -50,6 +51,34 @@ private:
     void ws() { while (pos_ < input_.size() && std::isspace(static_cast<unsigned char>(input_[pos_]))) ++pos_; }
     char take() { if (pos_ >= input_.size()) throw std::runtime_error("unexpected end of JSON"); return input_[pos_++]; }
     bool eat(char c) { ws(); if (pos_ < input_.size() && input_[pos_] == c) { ++pos_; return true; } return false; }
+    unsigned hex4() {
+        unsigned code = 0;
+        for (int i = 0; i < 4; ++i) {
+            const char h = take();
+            code <<= 4U;
+            if (h >= '0' && h <= '9') code |= static_cast<unsigned>(h - '0');
+            else if (h >= 'a' && h <= 'f') code |= static_cast<unsigned>(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') code |= static_cast<unsigned>(h - 'A' + 10);
+            else throw std::runtime_error("invalid unicode escape");
+        }
+        return code;
+    }
+    static void append_utf8(std::string &out, unsigned code) {
+        if (code < 0x80U) out.push_back(static_cast<char>(code));
+        else if (code < 0x800U) {
+            out.push_back(static_cast<char>(0xc0U | (code >> 6U)));
+            out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+        } else if (code < 0x10000U) {
+            out.push_back(static_cast<char>(0xe0U | (code >> 12U)));
+            out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3fU)));
+            out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+        } else {
+            out.push_back(static_cast<char>(0xf0U | (code >> 18U)));
+            out.push_back(static_cast<char>(0x80U | ((code >> 12U) & 0x3fU)));
+            out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3fU)));
+            out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+        }
+    }
     std::string string() {
         ws();
         if (take() != '"') throw std::runtime_error("expected JSON string");
@@ -66,24 +95,18 @@ private:
             case 'f': out.push_back('\f'); break; case 'n': out.push_back('\n'); break;
             case 'r': out.push_back('\r'); break; case 't': out.push_back('\t'); break;
             case 'u': {
-                unsigned code = 0;
-                for (int i = 0; i < 4; ++i) {
-                    char h = take(); code <<= 4U;
-                    if (h >= '0' && h <= '9') code |= static_cast<unsigned>(h - '0');
-                    else if (h >= 'a' && h <= 'f') code |= static_cast<unsigned>(h - 'a' + 10);
-                    else if (h >= 'A' && h <= 'F') code |= static_cast<unsigned>(h - 'A' + 10);
-                    else throw std::runtime_error("invalid unicode escape");
+                unsigned code = hex4();
+                if (code >= 0xd800U && code <= 0xdbffU) {
+                    if (take() != '\\' || take() != 'u')
+                        throw std::runtime_error("unpaired high surrogate");
+                    const unsigned low = hex4();
+                    if (low < 0xdc00U || low > 0xdfffU)
+                        throw std::runtime_error("invalid low surrogate");
+                    code = 0x10000U + ((code - 0xd800U) << 10U) + (low - 0xdc00U);
+                } else if (code >= 0xdc00U && code <= 0xdfffU) {
+                    throw std::runtime_error("unpaired low surrogate");
                 }
-                if (code >= 0xd800U && code <= 0xdfffU) throw std::runtime_error("surrogate escape unsupported");
-                if (code < 0x80U) out.push_back(static_cast<char>(code));
-                else if (code < 0x800U) {
-                    out.push_back(static_cast<char>(0xc0U | (code >> 6U)));
-                    out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
-                } else {
-                    out.push_back(static_cast<char>(0xe0U | (code >> 12U)));
-                    out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3fU)));
-                    out.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
-                }
+                append_utf8(out, code);
                 break;
             }
             default: throw std::runtime_error("invalid JSON escape");
@@ -123,12 +146,35 @@ private:
         if (input_.compare(pos_, 4, "true") == 0) { pos_ += 4; return Value{true}; }
         if (input_.compare(pos_, 5, "false") == 0) { pos_ += 5; return Value{false}; }
         if (input_.compare(pos_, 4, "null") == 0) { pos_ += 4; return Value{nullptr}; }
+        const std::size_t start = pos_;
+        if (input_[pos_] == '-') ++pos_;
+        if (pos_ >= input_.size()) throw std::runtime_error("invalid JSON number");
+        if (input_[pos_] == '0') {
+            ++pos_;
+        } else if (input_[pos_] >= '1' && input_[pos_] <= '9') {
+            while (pos_ < input_.size() && input_[pos_] >= '0' && input_[pos_] <= '9') ++pos_;
+        } else {
+            throw std::runtime_error("invalid JSON number");
+        }
+        if (pos_ < input_.size() && input_[pos_] == '.') {
+            ++pos_;
+            const std::size_t fraction_start = pos_;
+            while (pos_ < input_.size() && input_[pos_] >= '0' && input_[pos_] <= '9') ++pos_;
+            if (pos_ == fraction_start) throw std::runtime_error("invalid JSON number");
+        }
+        if (pos_ < input_.size() && (input_[pos_] == 'e' || input_[pos_] == 'E')) {
+            ++pos_;
+            if (pos_ < input_.size() && (input_[pos_] == '+' || input_[pos_] == '-')) ++pos_;
+            const std::size_t exponent_start = pos_;
+            while (pos_ < input_.size() && input_[pos_] >= '0' && input_[pos_] <= '9') ++pos_;
+            if (pos_ == exponent_start) throw std::runtime_error("invalid JSON number");
+        }
+        const std::string token = input_.substr(start, pos_ - start);
         char *end = nullptr;
         errno = 0;
-        const char *begin = input_.c_str() + pos_;
-        double n = std::strtod(begin, &end);
-        if (end == begin || errno == ERANGE) throw std::runtime_error("invalid JSON number");
-        pos_ += static_cast<std::size_t>(end - begin);
+        const double n = std::strtod(token.c_str(), &end);
+        if (errno == ERANGE || end != token.c_str() + token.size() || !std::isfinite(n))
+            throw std::runtime_error("invalid JSON number");
         return Value{n};
     }
 };

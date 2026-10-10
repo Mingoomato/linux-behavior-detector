@@ -1,60 +1,66 @@
 # Engineering Study Guide — Linux Ransomware Behavior Detection Lab
 
-## Learning objective and implementation status
+## Learning objective and current status
 
-This lab demonstrates a deterministic pipeline from synthetic file-event records to explainable host-level decisions. Its purpose is to teach event validation, time grouping, feature aggregation, rule evaluation, provenance, and metric interpretation without executing ransomware or touching real user files. It must always be presented as a simulation; fixture performance is not a real-world detection rate.
+This lab follows synthetic file-event records from input validation to evidence-backed host decisions. Study how event time differs from replay pacing, how the code fails closed to `unknown`, and how configured rule weights become auditable contributions. This is a deterministic simulation, not an endpoint protection product.
 
-Release build and the synthetic fixture CTest passed on the current Linux host. A separate ASan/UBSan smoke run is recorded as passed. The fixtures produced TP=4, FP=0, TN=8, FN=0, but generated labels and events are paired, so this only verifies pipeline wiring. A focused replay test now covers an overlapping 10-second event-time window, in-tolerance reordering, exact duplicate removal, a late event, and a conflicting duplicate ID. Implementation remains partial against SRS-02: the executable has no independent wall-clock monotonic replay timer and cannot detect missing records without producer sequence metadata; configured weights are not fully applied; development/validation data are not frozen separately; path pseudonymization and 100k-event measurements are absent; parser fuzzing is unverified.
+The Release build and focused CTest pass on the current Linux host. The focused test checks 10/30/60-second windows, reordering, duplicates, lateness, rule weights, hashes, and paced/unpaced equivalence. It does not prove real-world detection quality, missing-event detection without source sequences, holdout integrity, parser fuzz safety, or the 100k performance target. Automated completion is not evidence of owner mastery.
 
-## Why the subsystems exist
+## Why each subsystem exists
 
-| Subsystem | Purpose | Code |
+| Subsystem | Why it exists | Main code |
 |---|---|---|
-| Bounded JSON reader | Reject malformed, deeply nested, duplicate-key, or oversized JSON before field use. | `include/bdetect/json.hpp` |
-| Event importer | Converts event.v1 records into typed values and adds line-number context to failures. | `load_events`, `parse_time` |
-| Rules loader | Applies a version and basic numeric bounds to the lab rule set. | `load_rules` |
-| Time/window aggregator | Normalizes duplicates and in-tolerance ordering, then evaluates bounded overlapping event-time windows per host. | `normalize_events`, `evaluate` |
-| Explainable scorer | Emits named rule reasons and `unknown` when coverage or sample count is insufficient. | `evaluate`, `Decision` |
-| Decision serializer | Keeps `simulation_only`, source event IDs, rule revision, coverage, and unknown fields visible. | `write_decisions` |
-| Fixture/evaluation tools | Reproduces benign/suspicious synthetic scenarios and computes a confusion matrix. | `generate_fixtures`, `evaluate_labels` |
+| Bounded JSON parser | Reject malformed, oversized, deeply nested, or duplicate-key records before feature extraction. | `include/bdetect/json.hpp` |
+| Event importer | Convert event.v1 records to owned typed values and preserve line context on errors. | `read_limited_line`, `load_events`, `parse_time` |
+| Rule loader | Validate versioned feature/operator/threshold/weight/sample-count rules and hash exact rule bytes. | `load_rules`, `Rule`, `Rules` |
+| Normalizer | Deduplicate, identify conflicting IDs, degrade late input, enforce entity bounds, and order accepted events. | `normalize_events` |
+| Replay clock | Optionally map event-time spacing to monotonic deadlines without letting machine speed change event-time windows or scores. | `pace_replay` |
+| Window scorer | Aggregate unique path/extension features and emit configured weighted rule contributions. | `evaluate`, `Decision`, `Reason` |
+| Evidence writer | Preserve event IDs, rule and dataset hashes, window, score, rule contributions, coverage, and unknown reasons. | `write_decisions` |
+| Fixture and metric tools | Produce harmless synthetic input and a confusion-matrix wiring check. | `generate_fixtures`, `evaluate_labels` |
 
 ## Data and control flow
 
-1. `main` chooses `rules-validate`, `generate-fixtures`, `replay`, `evaluate`, `explain`, or `validate-events`.
-2. Replay loads `rules.v1`, then `load_events` parses each JSONL line and checks required event fields. Errors carry a one-based source line number.
-3. `normalize_events` removes exact duplicate IDs, marks conflicting IDs, drops events outside the per-host lateness tolerance, enforces `max_entities`, and stably sorts accepted records by host/time/ID. Late or conflicting evidence attaches an unknown reason to the host.
-4. `evaluate` walks each host's sorted events. Every distinct event second is a window endpoint; a moving left cursor removes events older than the configured 10/30/60-second horizon. Unique path and extension sets supply feature counts. Degraded/unknown coverage or insufficient sample count yields `unknown`; otherwise named thresholds add reasons and the score cutoff yields benign/suspicious.
-5. `write_decisions` emits one record per host/endpoint. `evaluate_labels` joins `entity_key` to CSV labels and writes counts and rates. `explain` retrieves a serialized decision by ID.
+1. `main` dispatches `rules-validate`, `generate-fixtures`, `replay`, `evaluate`, `explain`, or `validate-events`.
+2. `replay` parses a bounded rules file and hashes its exact bytes. It hashes the input file, parses each JSONL line, and hashes it again to detect a file changed during loading.
+3. `load_events` checks UTF-8, event.v1 fields, bounded lengths, and the record/event caps. Actor fields are deliberately ignored; an unknown actor stays unknown.
+4. `normalize_events` removes exact duplicate IDs, marks conflicts and events outside the lateness tolerance as host-level unknown conditions, enforces `max_entities`, and stably sorts by host/time/ID.
+5. Optional `--speed N` builds a global event-time timeline and uses `std::chrono::steady_clock` deadlines. Speed zero skips waiting. It does not alter event-time windows or score calculations.
+6. `evaluate` emits an overlapping event-time decision at each distinct event-second endpoint. Per-window sets count unique modified, renamed, deleted, extension, and event values. A matching rule adds its configured weight and a structured reason. Insufficient or degraded evidence yields `unknown`.
+7. `write_decisions` serializes source IDs, hashes, window, rule contributions, coverage, and `simulation_only=true`. `evaluate_labels` joins predictions to CSV labels and computes confusion-matrix rates.
 
-## Ownership, lifetime, and concurrency
+## Memory ownership and resource lifetimes
 
-- `load_events` owns an input `std::vector<Event>`; normalization copies accepted records into a second vector. `evaluate` holds non-owning pointers into the normalized vector, which remains alive and unmodified for the call.
-- The per-ID map and per-host timestamp map own keys; sliding-window feature sets own path/extension/ID copies. `max_entities` and total-event limits cap selected dimensions, but the whole corpus is still resident and the number of output windows can approach the event count.
-- `std::ifstream`/`std::ofstream` close files through RAII. The program is single-threaded and has no shared mutable worker queue.
-- Determinism comes from reading the whole corpus and ordered `std::map` keys, not from a streaming monotonic clock. Event timestamps control grouping.
+- `load_events` owns a vector of `Event` strings. `normalize_events` copies accepted events to a second vector; both coexist through replay.
+- `normalize_events` maps and sets use `std::string_view` keys into the stable input vector. Those views remain valid only while that input vector lives and is not mutated.
+- `evaluate` stores non-owning pointers into the normalized vector, which remains alive and immutable for the entire call. Window feature sets own copied strings.
+- File streams and the OpenSSL digest context use RAII. The digest context is freed after hashing. No manual descriptor or memory cleanup path is required.
+- Input JSONL records are capped at 1 MiB; serialized decision records are capped at 64 MiB. Event/host/rule counts have caps, but windows and output can still approach input cardinality. There is no streaming queue or TTL eviction yet.
 
-## Security assumptions and failure modes
+## Linux interfaces, concurrency, and security assumptions
 
-Treat event files, rules, labels, and output paths as untrusted. The importer bounds records before parsing, rejects invalid UTF-8, and limits selected event-field lengths, but full standards conformance and fuzz coverage are not established. Input paths and host IDs may be personal data and are currently emitted without full pseudonymization. Large valid inputs can still use considerable CPU and aggregate memory within current cardinality limits.
+This executable consumes files; it does not call inotify, fanotify, epoll, `openat2`, eBPF, or BPF LSM. C++ file streams own their underlying descriptors and close them at scope exit. `timegm` converts UTC-like broken-down timestamps to seconds. `steady_clock` supplies monotonic deadlines for optional pacing; wall-clock jumps cannot move those deadlines. The application is single-threaded, with no producer/consumer queue or lock protocol.
 
-Malformed records fail with a line number. Any coverage state other than healthy/observed, a conflicting duplicate ID, or an event outside the lateness tolerance produces `unknown`, avoiding a false benign claim. An exact duplicate ID with identical event fields is dropped before the minimum sample count. Missing events remain undetectable when the producer supplies no sequence number. Metrics are meaningful only if labels are valid, representative, and separated from tuning data.
+Treat event, rule, label, and output files as untrusted. Input paths, host identifiers, and event IDs can be sensitive and are emitted in clear text today; keep evidence local. Rules and input hashes prove byte identity only when the recorded digest is trusted; they do not prove dataset representativeness or prevent an attacker from replacing both file and digest. SHA-256 uses OpenSSL EVP. Unknown coverage, lateness, conflicts, and inadequate samples must never be relabeled benign.
+
+Failure modes include malformed/oversized JSON, invalid required fields, rule errors, invalid RFC 3339 dates/offsets, file read/write failures, cardinality limits, invalid speed, and allocation pressure. Fractional seconds are validated but window ordering currently has one-second precision. The offline corpus can use substantial memory before the event-count cap is reached.
 
 ## Alternatives and tradeoffs
 
-- A **watermark-based streaming window** can bound memory and release decisions incrementally; the current offline normalizer is simpler and deterministic but holds the corpus in memory.
-- A **monotonic replay clock** can expose processing/arrival timing independently from event time; the current replay is offline and its decisions do not depend on machine speed.
-- **Rule objects** with ID, feature, operator, threshold, weight, and minimum count are easier to audit than hard-coded branches, but need strict schema validation and versioning.
-- A **JSON Schema library** broadens standards validation; the local parser reduces dependencies but has a narrower tested surface.
-- Machine learning and content-entropy features are deliberately outside this deterministic baseline and would require separate data-quality and false-positive studies.
+- A streaming watermark and bounded queue would lower memory use but require explicit late-event and backpressure semantics. This offline batch path is simpler to reproduce.
+- A fully virtual monotonic clock would avoid sleep; the optional paced mode demonstrates monotonic scheduling while the fast default keeps tests quick.
+- Generic rule objects are auditable and configurable; their schema and feature vocabulary require strict validation. A learned model could capture interactions but would need independent data and calibration evidence.
+- A standards-compliant JSON library would expand parser coverage; the bundled small parser keeps dependencies low but needs fuzz and conformance work.
+- Dataset manifests and immutable development/holdout splits would strengthen reproducibility. Per-run input hashes alone do not supply that separation.
 
 ## Study route
 
-Read `docs/ARCHITECTURE.md`, then trace `replay` through `load_rules` → `load_events` → `normalize_events` → `evaluate` → `write_decisions`. Follow one fixture to the confusion matrix. Use `docs/CODE_WALKTHROUGH.md` and `docs/LINUX_INTERNALS_EXPLAINED.md`; attempt one task in `docs/DEBUGGING_EXERCISES.md` before requesting a solution review.
+Read `docs/ARCHITECTURE.md`, then trace `main` → `load_rules`/`load_events` → `normalize_events` → `pace_replay` → `evaluate` → `write_decisions`. Reconstruct one score from `reasons[]`; verify both hashes against the exact input bytes. Then run a task from `docs/DEBUGGING_EXERCISES.md` independently and defend your design with `docs/TECHNICAL_INTERVIEW.md`.
 
 ## Official references
 
-- [Linux kernel inotify documentation](https://docs.kernel.org/filesystems/inotify.html) and [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html)
-- [C++ `std::chrono`](https://en.cppreference.com/w/cpp/chrono.html) and [C++ file streams](https://en.cppreference.com/w/cpp/io/basic_ifstream.html)
-- [RFC 8259 — JSON](https://www.rfc-editor.org/rfc/rfc8259)
-- [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)
-- [NIST SP 800-218 SSDF](https://csrc.nist.gov/pubs/sp/800/218/final)
+- [C++ `std::chrono::steady_clock`](https://en.cppreference.com/w/cpp/chrono/steady_clock.html) and [C++ file streams](https://en.cppreference.com/w/cpp/io/basic_ifstream.html)
+- [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
+- [Linux `timegm(3)`](https://man7.org/linux/man-pages/man3/timegm.3.html) and [`clock_gettime(2)`](https://man7.org/linux/man-pages/man2/clock_gettime.2.html)
+- [RFC 8259 — JSON](https://www.rfc-editor.org/rfc/rfc8259), [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)
+- [Linux inotify documentation](https://docs.kernel.org/filesystems/inotify.html) and [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html) for possible upstream collectors; neither is implemented here.

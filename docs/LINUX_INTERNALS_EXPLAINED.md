@@ -1,28 +1,37 @@
 # Linux Internals Explained — Linux Ransomware Behavior Detection Lab
 
-## What this program observes
+## What the binary observes
 
-The classifier does not subscribe to a kernel event source. It consumes a file that another lab component or the fixture generator produced. That separation is intentional: `event.v1` is input data, and an actor marked unknown remains unknown. This binary cannot infer a process from nearby timestamps.
+`bdetect` reads event records from ordinary files. It does not subscribe to a kernel event source, open monitored directories, or inspect process state. The event producer is outside this repository. Actor attribution remains unknown unless a trusted source explicitly supplies it.
 
-## File I/O and timestamps
+## File descriptors and ownership
 
-`std::ifstream`/`std::ofstream` wrap host file descriptors and close them through RAII. `read_limited_line` reads one byte at a time into a reused `std::string` and stops at 1 MiB before appending more input. The importer also caps event ID, host ID, kind, and path lengths, limits total events, and checks unique host cardinality from the rules. These bounds constrain one record and selected indexes, but the corpus and normalized copy still reside in memory together.
+`std::ifstream` and `std::ofstream` provide buffered C++ stream operations over file descriptors (or equivalent platform handles). They acquire and release resources through RAII, including on exceptions. The code does not call `open(2)`, `read(2)`, or `close(2)` directly. `read_limited_line` reads one byte at a time through the stream interface and refuses to grow a record beyond 1 MiB. Current performance work should consider buffered bounded reads, while preserving the same cap and line-numbered failures.
 
-`parse_time` uses GNU/Linux `timegm` to convert a UTC broken-down time into epoch seconds, with one-second precision. Replay checks per-host arrival order against a configured lateness tolerance, removes exact duplicates, marks conflicts/too-late input unknown, and sorts accepted events by event time. It evaluates a rolling interval at each distinct event second. It still does not use a separate wall-clock-paced monotonic timer, and cannot identify a missing source record without a sequence number. A streaming design would use `CLOCK_MONOTONIC` for local deadlines while keeping event timestamps as a separate clock domain.
+The event vector owns the parsed strings. Normalization copies accepted records into another vector; hash maps and the evaluator use non-owning views/pointers whose lifetime is tied to those vectors. Hash contexts are owned by `std::unique_ptr` and release through `EVP_MD_CTX_free`.
 
-## Kernel event-source options
+## Event time and monotonic time
 
-If a future collector uses inotify, the kernel returns filesystem notifications through a file descriptor, but may coalesce events, overflow, and does not identify a reliable actor. Fanotify has different privilege and filesystem requirements. Either source must carry coverage metadata so BHD can choose `unknown` instead of benign when evidence is incomplete.
+`parse_time` validates an RFC 3339 date, clock, fractional field, and explicit `Z` or numeric offset, then normalizes the represented instant to epoch seconds. Fractional digits are accepted but discarded, so distinct subsecond events in one second are ordered at one-second precision. Window boundaries and lateness use event time, not the host's wall clock. Parser fuzz coverage remains open.
 
-There is no epoll, poll, io_uring, fanotify, eBPF, or BPF LSM code in the current executable. Do not imply these interfaces are implemented because the SRS discusses them as upstream event-source options.
+Optional `--speed` maps event-time offsets to `std::chrono::steady_clock` deadlines using `sleep_until`. The steady clock is monotonic and is not adjusted by wall-clock synchronization. Speed zero is fast/offline mode. Positive speed is only a replay pacing aid; it does not affect window membership or scores, and a scheduled wait above one hour is rejected. No direct `clock_gettime(2)` call appears in the source. On Linux, a standard-library implementation may obtain monotonic readings through platform runtime mechanisms, but that is an implementation detail.
 
-## Failure and resource handling
+## SHA-256 evidence
 
-Malformed JSON, bad required fields, invalid rule bounds, missing files/labels, or unwritable output produce an exception and nonzero exit. The corpus is accumulated before scoring, so memory use scales with total records. Total events are capped at one million and host entities have a configurable bound, but streaming retention is not implemented. Output replacement is not atomic. Unknown/degraded coverage, conflicting IDs, and too-late records produce `unknown` rather than benign.
+The executable calls OpenSSL EVP digest APIs to compute SHA-256 over the exact rules and input bytes. Rule bytes are bounded and parsed; the potentially large dataset is hashed in fixed-size chunks. The input is hashed again after parsing to detect concurrent byte changes. A digest identifies bytes, but does not establish who created them, whether labels are correct, or whether a holdout set was kept separate.
+
+## Upstream kernel interfaces
+
+If a separate collector supplies events, Linux inotify delivers filesystem notifications through a file descriptor but can coalesce events, overflow, and lacks reliable process attribution. Fanotify can provide different access and permission events with privilege and filesystem constraints. eBPF tracing could add process context only under an explicitly validated source and kernel policy. None of inotify, fanotify, epoll, io_uring, eBPF, or BPF LSM is implemented here. Coverage gaps from an upstream source must remain visible and make decisions unknown.
+
+## Concurrency and failure behavior
+
+This program is single-threaded. There is no worker queue, lock, atomic state, or backpressure mechanism. Input parsing fails on malformed or oversized 1 MiB records, unsupported schema, invalid required fields, or event limits. Rule validation fails before scoring on unsupported features/operators or invalid bounds. Decision JSONL can carry up to 64 MiB of event evidence; larger decisions are rejected before serialization. Late/conflicting events and non-healthy coverage produce unknown. Large allowed corpora still retain both source and normalized vectors, so the cap does not guarantee a small memory footprint. Output is not atomically replaced.
 
 ## Official references
 
-- [Linux inotify documentation](https://docs.kernel.org/filesystems/inotify.html), [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html)
-- [`clock_gettime(2)`](https://man7.org/linux/man-pages/man2/clock_gettime.2.html) for monotonic time
-- [C++ file streams](https://en.cppreference.com/w/cpp/io/basic_ifstream.html) and [C++ time utilities](https://en.cppreference.com/w/cpp/chrono/c.html)
-- [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259), [JSON Schema 2020-12](https://json-schema.org/draft/2020-12)
+- [C++ `steady_clock`](https://en.cppreference.com/w/cpp/chrono/steady_clock.html), [C++ file streams](https://en.cppreference.com/w/cpp/io/basic_ifstream.html)
+- [`clock_gettime(2)`](https://man7.org/linux/man-pages/man2/clock_gettime.2.html)
+- [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
+- [Linux inotify](https://docs.kernel.org/filesystems/inotify.html), [`fanotify(7)`](https://man7.org/linux/man-pages/man7/fanotify.7.html), [BPF LSM](https://docs.kernel.org/bpf/prog_lsm.html)
+- [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339), [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259)
