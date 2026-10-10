@@ -22,7 +22,7 @@
 
 ## 5. Output and metrics
 
-`write_decisions` writes decision.v1 JSONL with exact input/rule hashes, revision, source event IDs, event-time window, score, structured reasons, unknown fields, coverage, and `simulation_only=true`. `evaluate_labels` joins by entity key and reports TP/FP/TN/FN/unknown with rates that use `N/A` for zero denominators. Label parsing is currently intentionally simple and does not yet support quoted CSV fields or reject every label-set mismatch.
+`write_decisions` writes decision.v1 JSONL with exact input/rule hashes, revision, source event IDs, event-time window, score, structured reasons, unknown fields, coverage, and `simulation_only=true`. `evaluate_labels` parses bounded two-column CSV records, including quoted commas, escaped quotes, and embedded CRLF/LF, then joins by the exact entity key. It reports TP/FP/TN/FN/unknown with rates that use `N/A` for zero denominators and rejects missing/extra prediction entities, duplicate labels, malformed quoting, and invalid labels.
 
 `explain` scans a decision file for an ID and prints that serialized record. It does not recompute or validate the underlying hashes.
 

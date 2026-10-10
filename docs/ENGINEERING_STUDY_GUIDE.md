@@ -17,7 +17,7 @@ The GCC and Clang Release builds plus focused CTest pass on the current Linux ho
 | Replay clock | Optionally map event-time spacing to monotonic deadlines without letting machine speed change event-time windows or scores. | `pace_replay` |
 | Window scorer | Aggregate unique path/extension features and emit configured weighted rule contributions. | `evaluate`, `Decision`, `Reason` |
 | Evidence writer | Preserve event IDs, rule and dataset hashes, window, score, rule contributions, coverage, and unknown reasons. | `write_decisions` |
-| Fixture and metric tools | Produce harmless synthetic input and a confusion-matrix wiring check. | `generate_fixtures`, `evaluate_labels` |
+| Fixture and metric tools | Produce harmless synthetic input and a confusion-matrix wiring check; parse bounded quoted CSV labels and preserve metric denominators. | `generate_fixtures`, `evaluate_labels`, `read_csv_record` |
 
 ## Data and control flow
 
@@ -62,5 +62,5 @@ Read `docs/ARCHITECTURE.md`, then trace `main` → `load_rules`/`load_events` �
 - [C++ `std::chrono::steady_clock`](https://en.cppreference.com/w/cpp/chrono/steady_clock.html) and [C++ file streams](https://en.cppreference.com/w/cpp/io/basic_ifstream.html)
 - [OpenSSL EVP digest API](https://docs.openssl.org/3.0/man3/EVP_DigestInit/)
 - [Linux `timegm(3)`](https://man7.org/linux/man-pages/man3/timegm.3.html) and [`clock_gettime(2)`](https://man7.org/linux/man-pages/man2/clock_gettime.2.html)
-- [RFC 8259 — JSON](https://www.rfc-editor.org/rfc/rfc8259), [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)
+- [RFC 8259 — JSON](https://www.rfc-editor.org/rfc/rfc8259), [RFC 4180 — CSV format](https://www.rfc-editor.org/rfc/rfc4180), [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12)
 - [Linux inotify documentation](https://docs.kernel.org/filesystems/inotify.html) and [`inotify(7)`](https://man7.org/linux/man-pages/man7/inotify.7.html) for possible upstream collectors; neither is implemented here.

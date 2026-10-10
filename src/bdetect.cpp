@@ -27,6 +27,8 @@ using bdetect::json::Value;
 constexpr std::size_t MAX_RECORD_BYTES = 1024U * 1024U;
 constexpr std::size_t MAX_DECISION_RECORD_BYTES = 64U * 1024U * 1024U;
 constexpr std::size_t MAX_EVENT_COUNT = 1000000U;
+constexpr std::size_t MAX_LABEL_COUNT = 100000U;
+constexpr std::size_t MAX_LABEL_FIELD_BYTES = 256U;
 struct Event {
     std::string id, source, host, kind, path, observed, coverage, content_hash;
     std::string producer_session_id;
@@ -157,6 +159,115 @@ void validate_optional_integer(const Value &object, const char *field) {
     if (!number || !std::isfinite(*number) || std::floor(*number) != *number ||
         *number < 0 || *number > 9007199254740991.0)
         throw std::runtime_error(std::string("field must be a nonnegative integer: ") + field);
+}
+
+bool read_csv_record(std::istream &in, std::vector<std::string> &fields,
+                    std::size_t &line_number, std::size_t &start_line) {
+    fields.clear();
+    std::string field;
+    std::size_t record_bytes = 0;
+    start_line = line_number;
+    bool consumed = false;
+    bool quoted = false;
+    bool after_quote = false;
+    bool field_started = false;
+    auto add_byte = [&record_bytes]() {
+        if (++record_bytes > MAX_RECORD_BYTES)
+            throw std::runtime_error("CSV record too large");
+    };
+    auto append = [&field](char value) {
+        if (field.size() == MAX_LABEL_FIELD_BYTES)
+            throw std::runtime_error("CSV field too large");
+        field.push_back(value);
+    };
+    auto finish_field = [&]() {
+        if (fields.size() == 2U)
+            throw std::runtime_error("CSV record must contain exactly two fields");
+        fields.push_back(std::move(field));
+        field.clear();
+        field_started = false;
+        after_quote = false;
+    };
+    for (;;) {
+        const int next = in.get();
+        if (next == std::char_traits<char>::eof()) {
+            if (in.bad()) throw std::runtime_error("CSV read failure");
+            if (quoted) throw std::runtime_error("unterminated quoted field");
+            if (!consumed) return false;
+            finish_field();
+            return true;
+        }
+        consumed = true;
+        add_byte();
+        const char c = static_cast<char>(next);
+        if (quoted) {
+            if (c == '"') {
+                if (in.peek() == '"') {
+                    (void)in.get();
+                    add_byte();
+                    append('"');
+                } else {
+                    quoted = false;
+                    after_quote = true;
+                }
+            } else if (c == '\r') {
+                if (in.peek() != '\n')
+                    throw std::runtime_error("quoted CR must be followed by LF");
+                (void)in.get();
+                add_byte();
+                append('\r');
+                append('\n');
+                ++line_number;
+            } else {
+                append(c);
+                if (c == '\n') ++line_number;
+            }
+            continue;
+        }
+        if (after_quote) {
+            if (c == ',') {
+                finish_field();
+            } else if (c == '\n') {
+                finish_field();
+                ++line_number;
+                return true;
+            } else if (c == '\r') {
+                if (in.peek() != '\n')
+                    throw std::runtime_error("record CR must be followed by LF");
+                (void)in.get();
+                add_byte();
+                finish_field();
+                ++line_number;
+                return true;
+            } else {
+                throw std::runtime_error("characters after closing quote");
+            }
+            continue;
+        }
+        if (!field_started && c == '"') {
+            quoted = true;
+            field_started = true;
+        } else if (c == ',') {
+            finish_field();
+        } else if (c == '\n') {
+            finish_field();
+            ++line_number;
+            return true;
+        } else if (c == '\r') {
+            if (in.peek() != '\n')
+                throw std::runtime_error("record CR must be followed by LF");
+            (void)in.get();
+            add_byte();
+            finish_field();
+            ++line_number;
+            return true;
+        } else if (c == '"') {
+            throw std::runtime_error("quote inside unquoted field");
+        } else {
+            append(c);
+            field_started = true;
+        }
+    }
 }
 
 std::int64_t parse_time(const std::string &s) {
@@ -703,24 +814,48 @@ void evaluate_labels(const std::string &pred_path, const std::string &labels_pat
     std::map<std::string, std::string> labels;
     std::ifstream l(labels_path);
     if (!l) throw std::runtime_error("cannot open labels");
-    std::string line;
-    std::size_t label_line = 0;
-    while (read_limited_line(l, line)) {
-        ++label_line;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line.rfind("entity_key,", 0) == 0) continue;
-        auto comma = line.find(',');
-        if (comma == std::string::npos || line.find(',', comma + 1U) != std::string::npos)
-            throw std::runtime_error("bad labels CSV at line " + std::to_string(label_line) +
-                                     "; quoted or multi-column fields unsupported");
-        const std::string key = line.substr(0, comma);
-        const std::string label = line.substr(comma + 1U);
+    std::vector<std::string> fields;
+    std::size_t label_line = 1U;
+    std::size_t row_start_line = 1U;
+    bool first_nonempty_record = true;
+    for (;;) {
+        try {
+            if (!read_csv_record(l, fields, label_line, row_start_line)) break;
+        } catch (const std::exception &ex) {
+            throw std::runtime_error("bad labels CSV at line " + std::to_string(row_start_line) + ": " + ex.what());
+        }
+        if (fields.size() == 1U && fields[0].empty()) continue;
+        if (first_nonempty_record && fields.size() == 2U &&
+            fields[0] == "entity_key" && fields[1] == "label") {
+            first_nonempty_record = false;
+            continue;
+        }
+        first_nonempty_record = false;
+        if (fields.size() != 2U)
+            throw std::runtime_error("bad labels CSV at line " + std::to_string(row_start_line) +
+                                     ": expected exactly two fields");
+        for (const std::string &value : fields) {
+            if (!valid_utf8(value))
+                throw std::runtime_error("bad labels CSV at line " + std::to_string(row_start_line) +
+                                         ": invalid UTF-8");
+            for (unsigned char c : value) {
+                if (c < 0x20U && c != '\r' && c != '\n')
+                    throw std::runtime_error("bad labels CSV at line " + std::to_string(row_start_line) +
+                                             ": control byte in field");
+            }
+        }
+        const std::string &key = fields[0];
+        const std::string &label = fields[1];
         if (key.empty() || (label != "benign" && label != "suspicious"))
-            throw std::runtime_error("invalid label row");
-        if (!labels.emplace(key, label).second) throw std::runtime_error("duplicate entity label");
+            throw std::runtime_error("invalid label row at line " + std::to_string(row_start_line));
+        if (labels.size() == MAX_LABEL_COUNT)
+            throw std::runtime_error("label cardinality limit");
+        if (!labels.emplace(key, label).second)
+            throw std::runtime_error("duplicate entity label at line " + std::to_string(row_start_line));
     }
     std::ifstream p(pred_path);
     if (!p) throw std::runtime_error("cannot open predictions");
+    std::string line;
     int tp=0, fp=0, tn=0, fn=0, unknown=0;
     std::set<std::string> seen_entities;
     std::size_t prediction_line = 0;

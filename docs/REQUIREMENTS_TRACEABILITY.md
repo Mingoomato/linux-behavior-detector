@@ -16,7 +16,7 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 | BHD-FR-010 | `write_decisions` | `simulation_only=true` asserted for generated replay output | IMPLEMENTED |
 | BHD-FR-011 | `generate_fixtures` normal scenarios | CTest generates eight differentiated benign synthetic scenarios and evaluates labels; these are pipeline fixtures only | IMPLEMENTED |
 | BHD-FR-012 | `generate_fixtures` suspicious scenarios | `tests/smoke.sh` asserts all four synthetic suspicious cases and their contributing event IDs; these are still synthetic-only | IMPLEMENTED |
-| BHD-FR-013 | `evaluate_labels` | `tests/metrics.py` checks TP/FP/TN/FN/unknown, rate numerators/denominators, N/A, invalid labels and entity mismatches; quoted CSV remains unsupported | IMPLEMENTED |
+| BHD-FR-013 | `evaluate_labels` | `tests/metrics.py` checks TP/FP/TN/FN/unknown, rate numerators/denominators, N/A, invalid labels, entity mismatches, bounded quoted commas/quotes/newlines, malformed quoting, and duplicate decoded keys | IMPLEMENTED |
 | BHD-FR-014 | `ruleset_sha256`, `dataset_sha256` in decisions | exact rule/input byte hashes are emitted and tested; independent dev/holdout split, freeze manifest, and modification ledger remain pending | IN_PROGRESS |
 | BHD-FR-015 | bounded line reader, field caps, event cap, `max_entities` | targeted bounds pass; 100k probe completed (137,780 KiB max RSS); bounded streaming queue/TTL remains absent | IN_PROGRESS |
 | BHD-FR-016 | degraded coverage => unknown | BHD-T-009 pending | IMPLEMENTED |

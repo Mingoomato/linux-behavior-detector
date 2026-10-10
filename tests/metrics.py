@@ -35,6 +35,16 @@ assert (normal["fpr_numerator"], normal["fpr_denominator"]) == (0, 1)
 assert (normal["fnr_numerator"], normal["fnr_denominator"]) == (0, 1)
 assert normal["total_predictions"] == 3
 
+quoted = evaluate("quoted-valid", (
+    'entity_key,label\r\n"host,one",benign\r\n"host""two",suspicious\r\n'
+    '"line\r\nbreak",benign\r\n'
+), [
+    {"entity_key": "host,one", "decision": "benign"},
+    {"entity_key": 'host"two', "decision": "suspicious"},
+    {"entity_key": "line\r\nbreak", "decision": "benign"},
+], True)
+assert (quoted["tp"], quoted["fp"], quoted["tn"], quoted["fn"]) == (1, 0, 2, 0)
+
 zero_positive = evaluate("zero-positive", "entity_key,label\nonly-benign,benign\n", [
     {"entity_key": "only-benign", "decision": "benign"},
 ], True)
@@ -78,8 +88,37 @@ assert "duplicate entity label" in evaluate("duplicate-label", "entity_key,label
 assert "invalid prediction label" in evaluate("invalid-prediction", "entity_key,label\nhost,benign\n", [
     {"entity_key": "host", "decision": "maybe"},
 ], False)
-assert "bad labels CSV" in evaluate("quoted-label", 'entity_key,label\n"host,one",benign\n', [
-    {"entity_key": "host,one", "decision": "benign"},
+assert "line 2" in evaluate("quote-after-close", 'entity_key,label\n"host"x,benign\n', [
+    {"entity_key": "host", "decision": "benign"},
 ], False)
+assert "quote inside unquoted field" in evaluate("quote-in-unquoted", 'entity_key,label\nhost"one,benign\n', [
+    {"entity_key": "hostone", "decision": "benign"},
+], False)
+assert "unterminated quoted field" in evaluate("unterminated-quote", 'entity_key,label\n"host,benign', [
+    {"entity_key": "host", "decision": "benign"},
+], False)
+assert "exactly two fields" in evaluate("extra-csv-column", "entity_key,label\nhost,benign,extra\n", [
+    {"entity_key": "host", "decision": "benign"},
+], False)
+assert "duplicate entity label" in evaluate("duplicate-quoted-key",
+    'entity_key,label\nhost,benign\n"host",suspicious\n', [
+        {"entity_key": "host", "decision": "benign"},
+    ], False)
+assert "CSV field too large" in evaluate("oversized-csv-field",
+    "entity_key,label\n\"" + "x" * (1024 * 1024) + "\",benign\n", [
+        {"entity_key": "host", "decision": "benign"},
+    ], False)
+
+invalid_utf8_labels = work / "invalid-utf8-labels.csv"
+invalid_utf8_labels.write_bytes(b"entity_key,label\nhost-\xff,benign\n")
+invalid_utf8_predictions = work / "invalid-utf8-predictions.ndjson"
+invalid_utf8_predictions.write_text(json.dumps({"entity_key": "host", "decision": "benign"}) + "\n",
+                                    encoding="utf-8")
+invalid_utf8_result = subprocess.run([
+    str(binary), "evaluate", "--pred", str(invalid_utf8_predictions),
+    "--labels", str(invalid_utf8_labels), "--report", str(work / "invalid-utf8-report.json"),
+], capture_output=True, text=True)
+assert invalid_utf8_result.returncode != 0 and "line 2" in invalid_utf8_result.stderr
+assert "invalid UTF-8" in invalid_utf8_result.stderr
 
 print("BHD metric validation: PASS")

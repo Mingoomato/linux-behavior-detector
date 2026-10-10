@@ -26,17 +26,17 @@ Create a fuzz harness for the parser/import boundary and seed it with duplicate 
 
 **Acceptance:** The harness builds with sanitizers, a bounded fuzz session completes without crash/UB, and saved regression cases remain in deterministic tests.
 
-## Exercise 3 — Support quoted CSV labels safely
+## Exercise 3 — Add an auditable CSV metrics report
 
-**Goal:** Replace the deliberately minimal label reader with a correct, bounded CSV parser that handles quoted entity keys and rejects malformed quoting.
+**Goal:** Add an optional CSV output for the confusion matrix and rates while keeping the current JSON report available.
 
-**Starting points:** `evaluate_labels`, generated `labels.csv`, and `docs/TEST_PLAN.md`.
+**Starting points:** `evaluate_labels`, the `evaluate` CLI dispatch, `docs/TEST_PLAN.md`, and the existing JSON report fields.
 
-Support commas, escaped quotes, and quoted newlines according to the chosen CSV dialect. Add synthetic inputs with valid quoted keys, malformed quote placement, trailing columns, duplicate keys, and line-ending variations. Keep the existing numerator/denominator fields and explicit unknown count intact.
+Define stable columns for each metric, its numerator, denominator, value, and unknown predictions. Add synthetic valid and zero-denominator cases, then verify that quoting and line endings remain valid for CSV consumers.
 
-**Constraints:** Keep total file/field sizes bounded, reject invalid labels instead of treating every non-suspicious value as benign, and do not let CSV quoting change which entity is joined to a prediction.
+**Constraints:** Keep existing JSON output byte-compatible, preserve `N/A` for zero denominators, keep unknown separate from TP/FP/TN/FN, and do not disclose raw paths or extra prediction evidence.
 
-**Acceptance:** Quoted keys round-trip exactly; malformed CSV fails with a line number; all current metric-validation tests continue to pass.
+**Acceptance:** JSON and CSV outputs report identical counts/rates; tests cover normal and zero-denominator cases and parse the CSV report with a standard reader.
 
 ## Owner attempt record
 
