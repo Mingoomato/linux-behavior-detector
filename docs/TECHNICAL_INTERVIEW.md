@@ -37,7 +37,7 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 
 ## Design tradeoffs
 
-25. Compare the whole-corpus batch normalizer with strict-order `replay --stream`. What capabilities does the stream mode reject, and what would a bounded-disorder watermark require?
+25. Compare the whole-corpus batch normalizer with bounded-memory `replay --stream`. Which disorder does its event-time watermark accept, and which sequence capabilities remain batch-only?
 26. Compare fast offline replay, a paced monotonic timeline, and a fully virtual clock. Which should be used for deterministic tests and why?
 27. What would a frozen development/holdout manifest need to record to avoid tuning leakage? Where would the rule hash fit?
 28. When could inotify, fanotify, or eBPF be a useful upstream source, and what coverage, privilege, or attribution limits would remain?
@@ -69,6 +69,8 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 54. Derive the queue and active-window byte/count limits. What is the difference between dropping an event with an unknown interval and aborting the run for a hard resource limit?
 55. Why does the active TTL index store `(host, event_second)` entries? What invariant connects its global order to each host's deque front?
 56. How does the stream ID cache distinguish an exact retransmission from a conflicting reuse? What uniqueness guarantee is lost after an ID expires from the bounded cache?
-57. Describe the failure path from a malformed or backward-timestamp input record to the existing destination file. Which syscalls make temporary output publication atomic, and what durability guarantee is absent?
+57. Describe the failure path from a malformed or behind-watermark input record to the existing destination file. Which syscalls make temporary output publication atomic, and what durability guarantee is absent?
+58. Derive the stream watermark from maximum observed event time and configured lateness at whole-second precision. Why does the endpoint at the watermark remain buffered, and how does that allow multiple records from one second?
+59. How are recent IDs expired when input arrives out of order? Which index ordering is required, and what happens to an event older than the last emitted endpoint?
 
 The optional reports, rule-correlation analysis, dataset freeze/audit, aggregate input-size checks, active-window payload release, and bounded stream replay have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

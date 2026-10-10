@@ -41,6 +41,7 @@ constexpr std::size_t MAX_LABEL_FIELD_BYTES = 256U;
 constexpr std::size_t MAX_RULE_PAIR_UPDATES = 10000000U;
 constexpr std::size_t MAX_STREAM_QUEUE_COUNT = 4096U;
 constexpr std::size_t MAX_STREAM_QUEUE_BYTES = 64U * 1024U * 1024U;
+constexpr std::size_t MAX_STREAM_OVERFLOW_MARKERS = 4096U;
 constexpr std::size_t MAX_STREAM_ACTIVE_EVENTS = 100000U;
 constexpr std::size_t MAX_STREAM_ACTIVE_BYTES = 64U * 1024U * 1024U;
 constexpr std::size_t MAX_STREAM_ID_CACHE = 100000U;
@@ -1096,19 +1097,23 @@ std::size_t stream_replay(const std::string &input_path, const std::string &rule
     std::string line;
     std::uintmax_t input_bytes = 0;
     std::size_t line_number = 0, event_count = 0, decision_count = 0;
-    bool have_pending_epoch = false, have_previous_event = false;
-    std::int64_t pending_epoch = 0, previous_epoch = 0;
-    std::map<std::string, std::vector<Event>> pending;
-    std::set<std::string> endpoint_hosts, seen_hosts;
-    std::size_t queued_count = 0, queued_bytes = 0;
+    bool have_max_event_epoch = false;
+    std::int64_t max_event_epoch = 0;
+    bool have_flushed_epoch = false;
+    std::int64_t last_flushed_epoch = 0;
+    std::map<std::int64_t, std::map<std::string, std::vector<Event>>> pending_epochs;
+    std::set<std::string> seen_hosts;
+    std::size_t queued_count = 0, queued_bytes = 0, overflow_marker_count = 0;
     std::map<std::string, std::deque<Event>> active;
     std::deque<std::pair<std::string, std::int64_t>> active_order;
     std::size_t active_count = 0, active_bytes = 0;
     std::map<std::string, StreamSeenId> seen_ids;
-    std::deque<std::pair<std::string, std::int64_t>> seen_id_order;
+    std::multimap<std::int64_t, std::string> seen_id_order;
     std::map<std::string, std::map<std::string, std::int64_t>> issue_until;
     bool have_first_epoch = false;
     std::int64_t first_epoch = 0;
+    const std::int64_t allowed_lateness_seconds =
+        static_cast<std::int64_t>(rules.lateness_ms) / 1000;
     const auto pacing_origin = std::chrono::steady_clock::now();
 
     auto mark_issue = [&issue_until, &rules](const std::string &host, const std::string &reason,
@@ -1148,19 +1153,31 @@ std::size_t stream_replay(const std::string &input_path, const std::string &rule
             if (host_active->second.empty()) active.erase(host_active);
         }
 
-        for (auto &[host, events] : pending) {
-            for (Event &event : events) {
-                if (active_count >= MAX_STREAM_ACTIVE_EVENTS ||
-                    event.record_bytes > MAX_STREAM_ACTIVE_BYTES - active_bytes) {
-                    mark_issue(host, "active_window_capacity_exceeded", epoch);
-                    continue;
+        std::set<std::string> endpoint_hosts;
+        const auto endpoint = pending_epochs.find(epoch);
+        if (endpoint != pending_epochs.end()) {
+            for (auto &[host, events] : endpoint->second) {
+                endpoint_hosts.insert(host);
+                if (events.empty()) --overflow_marker_count;
+                std::sort(events.begin(), events.end(), [](const Event &left, const Event &right) {
+                    return left.id < right.id;
+                });
+                for (Event &event : events) {
+                    queued_bytes -= event.record_bytes;
+                    --queued_count;
+                    if (active_count >= MAX_STREAM_ACTIVE_EVENTS ||
+                        event.record_bytes > MAX_STREAM_ACTIVE_BYTES - active_bytes) {
+                        mark_issue(host, "active_window_capacity_exceeded", epoch);
+                        continue;
+                    }
+                    const std::int64_t event_epoch = event.epoch;
+                    active_bytes += event.record_bytes;
+                    ++active_count;
+                    active[host].push_back(std::move(event));
+                    active_order.emplace_back(host, event_epoch);
                 }
-                const std::int64_t event_epoch = event.epoch;
-                active_bytes += event.record_bytes;
-                ++active_count;
-                active[host].push_back(std::move(event));
-                active_order.emplace_back(host, event_epoch);
             }
+            pending_epochs.erase(endpoint);
         }
 
         for (const std::string &host : endpoint_hosts) {
@@ -1197,11 +1214,14 @@ std::size_t stream_replay(const std::string &input_path, const std::string &rule
             decision.id = "decision-" + std::to_string(++decision_count) + "-" + host;
             output.append(serialize_decision(decision, rules, dataset_hash));
         }
+        last_flushed_epoch = epoch;
+        have_flushed_epoch = true;
 
-        pending.clear();
-        endpoint_hosts.clear();
-        queued_count = 0;
-        queued_bytes = 0;
+    };
+
+    auto flush_ready = [&](std::int64_t watermark) {
+        while (!pending_epochs.empty() && pending_epochs.begin()->first < watermark)
+            flush_endpoint(pending_epochs.begin()->first);
     };
 
     bool had_newline = false;
@@ -1235,24 +1255,31 @@ std::size_t stream_replay(const std::string &input_path, const std::string &rule
         }
         if (event.has_producer_sequence)
             throw std::runtime_error("--stream does not accept producer sequence metadata; use batch replay");
-        if (have_previous_event && event.epoch < previous_epoch)
-            throw std::runtime_error("--stream requires nondecreasing event-time input; use batch replay");
-        previous_epoch = event.epoch;
-        have_previous_event = true;
+        if (have_flushed_epoch && event.epoch <= last_flushed_epoch)
+            throw std::runtime_error("event arrived behind the stream watermark; use batch replay");
+        if (have_max_event_epoch && event.epoch < max_event_epoch - allowed_lateness_seconds)
+            throw std::runtime_error("event exceeds the configured stream lateness tolerance; use batch replay");
+        if (!have_max_event_epoch || event.epoch > max_event_epoch) {
+            max_event_epoch = event.epoch;
+            have_max_event_epoch = true;
+        }
+        const std::int64_t watermark = max_event_epoch - allowed_lateness_seconds;
 
-        const std::int64_t retention = rules.window + (rules.lateness_ms + 999) / 1000;
-        const std::int64_t id_cutoff = event.epoch - retention;
-        while (!seen_id_order.empty() && seen_id_order.front().second < id_cutoff) {
-            const auto [old_id, old_epoch] = std::move(seen_id_order.front());
-            seen_id_order.pop_front();
+        const std::int64_t retention = static_cast<std::int64_t>(rules.window) + allowed_lateness_seconds;
+        const std::int64_t id_cutoff = max_event_epoch - retention;
+        while (!seen_id_order.empty() && seen_id_order.begin()->first < id_cutoff) {
+            const std::int64_t old_epoch = seen_id_order.begin()->first;
+            const std::string old_id = std::move(seen_id_order.begin()->second);
             const auto found = seen_ids.find(old_id);
             if (found != seen_ids.end() && found->second.epoch == old_epoch)
                 seen_ids.erase(found);
+            seen_id_order.erase(seen_id_order.begin());
         }
         auto duplicate = seen_ids.find(event.id);
         if (duplicate != seen_ids.end()) {
             if (duplicate->second.content_hash != event.content_hash)
                 throw std::runtime_error("conflicting duplicate event_id in stream");
+            flush_ready(watermark);
             continue;
         }
         if (seen_hosts.insert(event.host).second && seen_hosts.size() > static_cast<std::size_t>(rules.max_entities))
@@ -1260,28 +1287,32 @@ std::size_t stream_replay(const std::string &input_path, const std::string &rule
         if (seen_ids.size() >= MAX_STREAM_ID_CACHE)
             throw std::runtime_error("stream event ID cache limit reached; use batch replay");
         seen_ids.emplace(event.id, StreamSeenId{event.content_hash, event.epoch});
-        seen_id_order.emplace_back(event.id, event.epoch);
+        seen_id_order.emplace(event.epoch, event.id);
 
-        if (have_pending_epoch && event.epoch != pending_epoch) {
-            flush_endpoint(pending_epoch);
-            have_pending_epoch = false;
-        }
-        if (!have_pending_epoch) {
-            pending_epoch = event.epoch;
-            have_pending_epoch = true;
-        }
-        endpoint_hosts.insert(event.host);
         const bool queue_overflow = queued_count >= MAX_STREAM_QUEUE_COUNT ||
             event.record_bytes > MAX_STREAM_QUEUE_BYTES - queued_bytes;
+        auto &epoch_hosts = pending_epochs[event.epoch];
+        auto host_position = epoch_hosts.find(event.host);
         if (queue_overflow) {
+            if (host_position == epoch_hosts.end()) {
+                if (overflow_marker_count >= MAX_STREAM_OVERFLOW_MARKERS)
+                    throw std::runtime_error("stream overflow marker limit reached");
+                epoch_hosts.try_emplace(event.host);
+                ++overflow_marker_count;
+            }
             mark_issue(event.host, "bounded_reorder_queue_overflow", event.epoch);
-            continue;
+        } else {
+            if (host_position == epoch_hosts.end())
+                host_position = epoch_hosts.try_emplace(event.host).first;
+            else if (host_position->second.empty())
+                --overflow_marker_count;
+            queued_bytes += event.record_bytes;
+            ++queued_count;
+            host_position->second.push_back(std::move(event));
         }
-        queued_bytes += event.record_bytes;
-        ++queued_count;
-        pending[event.host].push_back(std::move(event));
+        flush_ready(watermark);
     }
-    if (have_pending_epoch) flush_endpoint(pending_epoch);
+    while (!pending_epochs.empty()) flush_endpoint(pending_epochs.begin()->first);
 
     std::array<unsigned char, EVP_MAX_MD_SIZE> consumed_bytes{};
     unsigned int consumed_size = 0;

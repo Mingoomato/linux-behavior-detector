@@ -26,17 +26,17 @@ Create table-driven invalid records for missing paired metadata, wrong scalar ty
 
 **Acceptance:** Positive and negative cases run deterministically, report the schema/property responsible for rejection, and remain separate from parser fuzz results.
 
-## Exercise 3 — Extend stream replay with a disorder watermark
+## Exercise 3 — Finalize producer sequence gaps online
 
-**Goal:** Extend the strict-order `replay --stream` contract to accept a documented, bounded amount of event-time disorder while preserving conservative unknown decisions.
+**Goal:** Extend `replay --stream` to consume optional producer session/sequence metadata and make bounded, window-scoped gap decisions without buffering the full input.
 
-**Starting points:** `stream_replay`, `active_order`, `issue_until`, `evaluate`, the configured `window_seconds`/`lateness_tolerance_ms`, and `docs/ARCHITECTURE.md`.
+**Starting points:** the batch `(host, source, producer_session_id)` sequence audit, `stream_replay`, its watermark queue and `issue_until`, and `docs/ARCHITECTURE.md`.
 
-Specify the watermark, maximum in-flight event count and byte size, queue overflow behavior, and when a source sequence gap becomes final. Define how an event arriving behind the watermark affects already emitted windows and how TTL eviction interacts with overlapping windows. Keep strict-order stream and batch modes available.
+Specify how session restarts, duplicate sequence numbers, mixed sequenced/unsequenced sources, and sequence gaps interact with event-time disorder. Bound any per-source sequence state and define when a missing sequence becomes final. Decide how gap status propagates across overlapping windows and when that metadata expires.
 
 **Constraints:** Do not claim a missing event when the producer supplies no sequence metadata. Do not evict evidence still needed by an open window. Keep actor attribution unknown and preserve the rule that degraded coverage cannot become benign. Use only synthetic event fixtures.
 
-**Acceptance:** Memory use is bounded by documented queue/feature limits; deterministic synthetic cases cover in-order data, bounded disorder, late arrivals, sequence gaps, overflow, TTL expiry, and unknown propagation. Record the tradeoff for windows already emitted before a late event arrives.
+**Acceptance:** Memory use is bounded by documented queue/feature limits; synthetic cases cover session restart, gaps, duplicate/colliding sequence values, mixed metadata, watermark boundaries, overflow, TTL expiry, and unknown propagation. Do not reveal a full solution before the owner attempts the exercise.
 
 ## Owner attempt record
 
