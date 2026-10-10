@@ -8,6 +8,7 @@
 - For `evaluate --csv-report` and `--html-report`, compare counts/rates with JSON, verify unknown remains separate, assert chronological decision order and omission of raw paths, test hostile HTML text escaping, quoted CSV cells with CRLF, output-path alias rejection, missing/invalid window fields, zero-denominator `N/A`, and the 100,000-row timeline cap.
 - For `analyze-rules`, verify pair contingency counts, Jaccard and phi values for identical/disjoint/partially co-active rules, repeated reasons within one decision, empty input, malformed reason arrays, output alias rejection, and each decision/rule/pair-update limit. Validate the output against `contracts/rule-analysis-v1.schema.json`; explicitly document that overlapping windows are dependent.
 - Exercise 512 MiB aggregate file-size refusal and read-time growth refusal for event, prediction, and rule-analysis inputs; test exact-boundary acceptance using sparse synthetic data without allocating an unbounded corpus.
+- Check event payload lifetime at 10/30/60-second window expiration and large time jumps; ensure copied evidence for emitted decisions remains available after expired event strings are released.
 - Verify `--stats-out` percentiles and schema, empty-result nulls, refusal of input/rule/output path aliases, and byte-identical decision JSONL with stats enabled.
 - Measure 100k records, peak RSS, p95 decision latency, and runtime on a documented machine.
 

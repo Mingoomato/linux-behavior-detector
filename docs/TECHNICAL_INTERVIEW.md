@@ -58,5 +58,6 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 43. Compare Jaccard similarity with the phi coefficient. When is phi undefined, and how can overlapping windows distort either statistic?
 44. What does the ten-million pair-update cap bound? Why does the analysis reject dense input rather than truncate the report silently?
 45. How do the 512 MiB file limit and per-record limit complement event-count/cardinality caps? Which allocations still remain proportional to the complete batch?
+46. In `evaluate`, when can an `Event` string payload be released safely while `by_host` stores pointers into the vector? Which scalar fields and indexes still remain alive, and what would invalidate the lifetime argument?
 
-The optional reports, rule-correlation analysis, and aggregate input-size checks have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.
+The optional reports, rule-correlation analysis, aggregate input-size checks, and active-window payload release have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

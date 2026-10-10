@@ -40,6 +40,18 @@ struct Event {
     bool has_producer_sequence = false;
     std::int64_t epoch = 0;
 };
+
+void release_event_payload(Event &event) {
+    std::string{}.swap(event.id);
+    std::string{}.swap(event.source);
+    std::string{}.swap(event.host);
+    std::string{}.swap(event.kind);
+    std::string{}.swap(event.path);
+    std::string{}.swap(event.observed);
+    std::string{}.swap(event.coverage);
+    std::string{}.swap(event.content_hash);
+    std::string{}.swap(event.producer_session_id);
+}
 struct Rule {
     std::string id, feature, op;
     int threshold = 0, weight = 0, min_samples = 1;
@@ -664,24 +676,30 @@ void pace_replay(const std::vector<Event> &events, double speed) {
     }
 }
 
-std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
+std::vector<Decision> evaluate(std::vector<Event> &events, const Rules &r,
                                const IntakeIssues &issues,
                                std::vector<std::uint64_t> *decision_latency_ns = nullptr) {
-    std::map<std::string, std::vector<const Event *>> by_host;
-    for (const auto &e : events) by_host[e.host].push_back(&e);
+    std::map<std::string, std::vector<Event *>> by_host;
+    for (Event &e : events) by_host[e.host].push_back(&e);
     std::vector<Decision> out;
     for (const auto &[host, host_events] : by_host) {
         std::size_t left = 0;
-        std::set<std::int64_t> endpoints;
-        for (const Event *event : host_events) endpoints.insert(event->epoch);
-        for (std::int64_t end : endpoints) {
+        std::size_t right_cursor = 0;
+        for (std::size_t endpoint = 0; endpoint < host_events.size();) {
+            const std::int64_t end = host_events[endpoint]->epoch;
+            while (endpoint < host_events.size() && host_events[endpoint]->epoch == end) ++endpoint;
             const auto decision_started = decision_latency_ns
                 ? std::chrono::steady_clock::now()
                 : std::chrono::steady_clock::time_point{};
             const std::int64_t start = end - r.window;
-            while (left < host_events.size() && host_events[left]->epoch < start) ++left;
-            std::size_t right = left;
-            while (right < host_events.size() && host_events[right]->epoch <= end) ++right;
+            while (left < host_events.size() && host_events[left]->epoch < start) {
+                release_event_payload(*host_events[left]);
+                ++left;
+            }
+            if (right_cursor < left) right_cursor = left;
+            while (right_cursor < host_events.size() && host_events[right_cursor]->epoch <= end)
+                ++right_cursor;
+            const std::size_t right = right_cursor;
             const std::size_t count = right - left;
             Decision d;
             d.host = host;
@@ -765,6 +783,8 @@ std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
             }
             out.push_back(std::move(d));
         }
+        for (std::size_t i = left; i < host_events.size(); ++i)
+            release_event_payload(*host_events[i]);
     }
     return out;
 }
@@ -1351,8 +1371,10 @@ int main(int argc, char **argv) {
             auto input_events = load_events(input_path);
             if (sha256_file(input_path) != dataset_hash)
                 throw std::runtime_error("input changed while replay was loading");
+            const std::size_t input_event_count = input_events.size();
             IntakeIssues issues;
             auto events = normalize_events(input_events, rules, issues);
+            std::vector<Event>().swap(input_events);
             std::size_t speed_bytes = 0;
             const std::string speed_arg = arg(argc, argv, "--speed", "0");
             double speed = 0.0;
@@ -1381,7 +1403,7 @@ int main(int argc, char **argv) {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(evaluation_elapsed).count());
             write_decisions(output_path, decisions, rules, dataset_hash);
             if (!stats_path.empty())
-                write_replay_stats(stats_path, input_events.size(), decisions.size(),
+                write_replay_stats(stats_path, input_event_count, decisions.size(),
                                    evaluation_duration_ns, std::move(decision_latency_ns));
             std::cout << "decisions=" << decisions.size() << " simulation_only=true\n";
         } else if (command == "evaluate") {
