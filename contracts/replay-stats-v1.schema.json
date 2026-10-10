@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linuxsecurity.local/bdetect/contracts/replay-stats-v1.schema.json",
+  "title": "BHD Replay Statistics v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "measurement_scope", "input_events", "decisions", "evaluation_duration_ns", "decision_latency_ns"],
+  "properties": {
+    "schema_version": {"const": "bdetect.replay_stats.v1"},
+    "measurement_scope": {"const": "evaluate_only_excludes_input_io_pacing_and_serialization"},
+    "input_events": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "decisions": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "evaluation_duration_ns": {"type": "integer", "minimum": 0},
+    "decision_latency_ns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "p50", "p95", "p99", "max"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "p50": {"type": ["integer", "null"], "minimum": 0},
+        "p95": {"type": ["integer", "null"], "minimum": 0},
+        "p99": {"type": ["integer", "null"], "minimum": 0},
+        "max": {"type": ["integer", "null"], "minimum": 0}
+      }
+    }
+  }
+}

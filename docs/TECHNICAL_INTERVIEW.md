@@ -48,5 +48,6 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 33. Which decisions become `unknown` after a batch-level sequence gap is found? How would an interval-scoped online watermark change the design and its resource lifetimes?
 34. Why does mixing sequenced and unsequenced records for the same host/source degrade coverage, while a source that is wholly unsequenced remains under the legacy behavior?
 35. How does `read_csv_record` distinguish escaped quotes from a closing quote, and which resource limits apply to a logical multiline record?
+36. How is nearest-rank p95 computed from the optional stats sidecar, what work is excluded, and how would you check that enabling it leaves decision bytes unchanged?
 
 Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

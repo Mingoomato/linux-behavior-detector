@@ -4,7 +4,7 @@
 
 This lab follows synthetic file-event records from input validation to evidence-backed host decisions. Study how event time differs from replay pacing, how the code fails closed to `unknown`, and how configured rule weights become auditable contributions. This is a deterministic simulation, not an endpoint protection product.
 
-The GCC and Clang Release builds plus focused CTest pass on the current Linux host; ASan/UBSan verification also passes. Tests check 10/30/60-second windows, reordering, duplicates, lateness, optional producer sequence gaps and restarts, quoted CSV labels, rule weights, hashes, and paced/unpaced equivalence. One optional 100,000-run Clang libFuzzer campaign exercised the JSON parser under ASan/UBSan without a crash, but it does not establish importer/timestamp fuzz safety. These checks do not prove real-world detection quality, missing-event detection without source sequences, online watermark semantics, holdout integrity, or the 100k performance target. Automated completion is not evidence of owner mastery.
+The GCC and Clang Release builds plus focused CTest pass on the current Linux host; ASan/UBSan verification also passes. Tests check 10/30/60-second windows, reordering, duplicates, lateness, optional producer sequence gaps and restarts, quoted CSV labels, rule weights, hashes, and paced/unpaced equivalence. One optional 100,000-run Clang libFuzzer campaign exercised the JSON parser under ASan/UBSan without a crash, but it does not establish importer/timestamp fuzz safety. These checks do not prove real-world detection quality, missing-event detection without source sequences, online watermark semantics, holdout integrity, repeated performance baselines, or resource behavior at maximum configured limits. Automated completion is not evidence of owner mastery.
 
 ## Why each subsystem exists
 
@@ -16,7 +16,7 @@ The GCC and Clang Release builds plus focused CTest pass on the current Linux ho
 | Normalizer | Deduplicate, identify conflicting IDs, degrade late input, detect optional per-session producer sequence gaps/collisions, enforce entity bounds, and order accepted events. | `normalize_events` |
 | Replay clock | Optionally map event-time spacing to monotonic deadlines without letting machine speed change event-time windows or scores. | `pace_replay` |
 | Window scorer | Aggregate unique path/extension features and emit configured weighted rule contributions. | `evaluate`, `Decision`, `Reason` |
-| Evidence writer | Preserve event IDs, rule and dataset hashes, window, score, rule contributions, coverage, and unknown reasons. | `write_decisions` |
+| Evidence writer and optional performance record | Preserve event IDs, rule/dataset hashes, windows, scores, contributions, coverage, and unknown reasons; optionally record per-decision scoring percentiles. | `write_decisions`, `write_replay_stats` |
 | Fixture and metric tools | Produce harmless synthetic input and a confusion-matrix wiring check; parse bounded quoted CSV labels and preserve metric denominators. | `generate_fixtures`, `evaluate_labels`, `read_csv_record` |
 
 ## Data and control flow
@@ -27,7 +27,7 @@ The GCC and Clang Release builds plus focused CTest pass on the current Linux ho
 4. `normalize_events` removes exact duplicate IDs, marks conflicts and events outside the lateness tolerance as host-level unknown conditions, checks optional sequence metadata grouped by `(host, source, producer_session_id)`, enforces `max_entities`, and stably sorts by host/time/ID. A new producer session permits sequence reset; a sequence gap or duplicate sequence with different IDs degrades the host. Mixing sequenced and unsequenced records from one host/source also degrades it.
 5. Optional `--speed N` builds a global event-time timeline and uses `std::chrono::steady_clock` deadlines. Speed zero skips waiting. It does not alter event-time windows or score calculations.
 6. `evaluate` emits an overlapping event-time decision at each distinct event-second endpoint. Per-window sets count unique modified, renamed, deleted, extension, and event values. A matching rule adds its configured weight and a structured reason. Insufficient or degraded evidence yields `unknown`.
-7. `write_decisions` serializes source IDs, hashes, window, rule contributions, coverage, and `simulation_only=true`. `evaluate_labels` joins predictions to CSV labels and computes confusion-matrix rates.
+7. `write_decisions` serializes source IDs, hashes, window, rule contributions, coverage, and `simulation_only=true`. When `--stats-out` is supplied, `evaluate` records each window's duration using `steady_clock`; `write_replay_stats` emits percentiles to a separate sidecar. It excludes input parsing, pacing, and JSON serialization. `evaluate_labels` joins predictions to CSV labels and computes confusion-matrix rates.
 
 ## Memory ownership and resource lifetimes
 
@@ -35,7 +35,7 @@ The GCC and Clang Release builds plus focused CTest pass on the current Linux ho
 - `normalize_events` maps and sets use `std::string_view` keys into the stable input vector. Those views remain valid only while that input vector lives and is not mutated.
 - `evaluate` stores non-owning pointers into the normalized vector, which remains alive and immutable for the entire call. Window feature sets own copied strings.
 - File streams and the OpenSSL digest context use RAII. The digest context is freed after hashing. No manual descriptor or memory cleanup path is required.
-- Input JSONL records are capped at 1 MiB; serialized decision records are capped at 64 MiB. Event/host/rule counts have caps, but windows and output can still approach input cardinality. There is no streaming queue or TTL eviction yet. Sequence analysis is whole-batch and host-level; it does not implement an online watermark or interval-scoped unknown decisions.
+- Input JSONL records are capped at 1 MiB; serialized decision records are capped at 64 MiB. Event/host/rule counts have caps, but windows and output can still approach input cardinality. Requested stats hold one 64-bit latency sample per decision and sort them to calculate exact percentiles, adding O(decisions) memory. There is no streaming queue or TTL eviction yet. Sequence analysis is whole-batch and host-level; it does not implement an online watermark or interval-scoped unknown decisions.
 
 ## Linux interfaces, concurrency, and security assumptions
 

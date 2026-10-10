@@ -120,6 +120,52 @@ assert reason == {
 assert latest["ruleset_sha256"] == hashlib.sha256(rules_path.read_bytes()).hexdigest(), latest
 assert latest["dataset_sha256"] == hashlib.sha256(input_path.read_bytes()).hexdigest(), latest
 
+stats_path = work / "replay-stats.json"
+stats_output = work / "window-output-with-stats.ndjson"
+subprocess.run([
+    str(binary), "replay", "--input", str(input_path), "--rules", str(rules_path),
+    "--out", str(stats_output), "--stats-out", str(stats_path),
+], check=True, capture_output=True, text=True)
+assert stats_output.read_bytes() == output_path.read_bytes()
+stats = json.loads(stats_path.read_text(encoding="utf-8"))
+latencies = stats["decision_latency_ns"]
+assert stats["input_events"] == len(rows)
+assert stats["measurement_scope"] == "evaluate_only_excludes_input_io_pacing_and_serialization"
+assert stats["decisions"] == len(decisions) == latencies["sample_count"]
+assert latencies["p50"] <= latencies["p95"] <= latencies["p99"] <= latencies["max"]
+assert stats["evaluation_duration_ns"] >= latencies["max"]
+
+stats_alias = subprocess.run([
+    str(binary), "replay", "--input", str(input_path), "--rules", str(rules_path),
+    "--out", str(work / "alias-output.ndjson"), "--stats-out", str(input_path),
+], capture_output=True, text=True)
+assert stats_alias.returncode != 0 and "separate file" in stats_alias.stderr
+stats_path_alias = subprocess.run([
+    str(binary), "replay", "--input", str(input_path), "--rules", str(rules_path),
+    "--out", str(work / "path-alias-output.ndjson"),
+    "--stats-out", str(work / "." / "path-alias-output.ndjson"),
+], capture_output=True, text=True)
+assert stats_path_alias.returncode != 0 and "separate file" in stats_path_alias.stderr
+stats_missing = subprocess.run([
+    str(binary), "replay", "--input", str(input_path), "--rules", str(rules_path),
+    "--out", str(work / "missing-stats-output.ndjson"), "--stats-out",
+], capture_output=True, text=True)
+assert stats_missing.returncode != 0 and "requires a file path" in stats_missing.stderr
+
+empty_input = work / "empty-events.ndjson"
+empty_input.write_bytes(b"")
+empty_output = work / "empty-output.ndjson"
+empty_stats = work / "empty-stats.json"
+subprocess.run([
+    str(binary), "replay", "--input", str(empty_input), "--rules", str(rules_path),
+    "--out", str(empty_output), "--stats-out", str(empty_stats),
+], check=True, capture_output=True, text=True)
+empty_metrics = json.loads(empty_stats.read_text(encoding="utf-8"))
+assert empty_output.read_bytes() == b""
+assert empty_metrics["decision_latency_ns"] == {
+    "sample_count": 0, "p50": None, "p95": None, "p99": None, "max": None,
+}
+
 # Pacing uses a monotonic deadline but must not alter event-time decisions.
 paced_out = work / "window-output-paced.ndjson"
 subprocess.run([

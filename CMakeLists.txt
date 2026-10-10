@@ -15,7 +15,7 @@ target_compile_options(bdetect PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_test(NAME behavior-fixtures COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh)
+    add_test(NAME behavior-fixtures COMMAND ${CMAKE_COMMAND} -E env BIN_DIR=$<TARGET_FILE_DIR:bdetect> ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh)
 endif()
 
 option(BDETECT_BUILD_FUZZER "Build the optional Clang libFuzzer JSON parser target" OFF)

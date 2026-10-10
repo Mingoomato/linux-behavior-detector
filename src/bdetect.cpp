@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -640,7 +641,8 @@ void pace_replay(const std::vector<Event> &events, double speed) {
 }
 
 std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
-                               const IntakeIssues &issues) {
+                               const IntakeIssues &issues,
+                               std::vector<std::uint64_t> *decision_latency_ns = nullptr) {
     std::map<std::string, std::vector<const Event *>> by_host;
     for (const auto &e : events) by_host[e.host].push_back(&e);
     std::vector<Decision> out;
@@ -649,6 +651,9 @@ std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
         std::set<std::int64_t> endpoints;
         for (const Event *event : host_events) endpoints.insert(event->epoch);
         for (std::int64_t end : endpoints) {
+            const auto decision_started = decision_latency_ns
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             const std::int64_t start = end - r.window;
             while (left < host_events.size() && host_events[left]->epoch < start) ++left;
             std::size_t right = left;
@@ -729,6 +734,11 @@ std::vector<Decision> evaluate(const std::vector<Event> &events, const Rules &r,
                 d.label = d.unknown.empty() && d.score >= r.cutoff ? "suspicious" :
                           d.unknown.empty() ? "benign" : "unknown";
             }
+            if (decision_latency_ns) {
+                const auto elapsed = std::chrono::steady_clock::now() - decision_started;
+                decision_latency_ns->push_back(static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));
+            }
             out.push_back(std::move(d));
         }
     }
@@ -802,6 +812,46 @@ void write_decisions(const std::string &path, const std::vector<Decision> &ds,
         }
         out << "]}\n";
     }
+}
+
+void write_replay_stats(const std::string &path, std::size_t input_events,
+                        std::size_t decisions, std::uint64_t evaluation_duration_ns,
+                        std::vector<std::uint64_t> decision_latency_ns) {
+    if (decision_latency_ns.size() != decisions)
+        throw std::runtime_error("replay latency sample count mismatch");
+    std::sort(decision_latency_ns.begin(), decision_latency_ns.end());
+    auto percentile = [&decision_latency_ns](unsigned int percent) -> std::string {
+        if (decision_latency_ns.empty()) return "null";
+        const std::size_t rank =
+            (decision_latency_ns.size() * static_cast<std::size_t>(percent) + 99U) / 100U;
+        return std::to_string(decision_latency_ns[rank - 1U]);
+    };
+    const std::string maximum = decision_latency_ns.empty()
+        ? "null" : std::to_string(decision_latency_ns.back());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("cannot open replay stats output");
+    out << "{\"schema_version\":\"bdetect.replay_stats.v1\","
+        << "\"measurement_scope\":\"evaluate_only_excludes_input_io_pacing_and_serialization\","
+        << "\"input_events\":" << input_events << ",\"decisions\":" << decisions
+        << ",\"evaluation_duration_ns\":" << evaluation_duration_ns
+        << ",\"decision_latency_ns\":{\"sample_count\":" << decision_latency_ns.size()
+        << ",\"p50\":" << percentile(50U)
+        << ",\"p95\":" << percentile(95U)
+        << ",\"p99\":" << percentile(99U)
+        << ",\"max\":" << maximum << "}}\n";
+    out.flush();
+    if (!out) throw std::runtime_error("cannot write replay stats output");
+}
+
+bool same_file_or_path(const std::string &left, const std::string &right) {
+    if (left == right) return true;
+    std::error_code left_error, right_error;
+    const auto left_canonical = std::filesystem::weakly_canonical(left, left_error);
+    const auto right_canonical = std::filesystem::weakly_canonical(right, right_error);
+    if (!left_error && !right_error && left_canonical == right_canonical) return true;
+    struct stat left_stat {}, right_stat {};
+    return stat(left.c_str(), &left_stat) == 0 && stat(right.c_str(), &right_stat) == 0 &&
+           left_stat.st_dev == right_stat.st_dev && left_stat.st_ino == right_stat.st_ino;
 }
 
 void validate_events(const std::string &file) {
@@ -961,7 +1011,7 @@ static std::string arg(int argc, char **argv, const std::string &name, const std
 int main(int argc, char **argv) {
     try {
         if (argc < 2 || std::string(argv[1]) == "--help") {
-            std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER]\n"
+            std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER] [--stats-out FILE]\n"
                          "bdetect evaluate --pred FILE --labels CSV --report FILE\n"
                          "bdetect rules-validate --file FILE\n"
                          "bdetect generate-fixtures --root SANDBOX --out NEW-DIR\n"
@@ -990,8 +1040,29 @@ int main(int argc, char **argv) {
             catch (...) { throw std::runtime_error("invalid replay speed"); }
             if (speed_bytes != speed_arg.size()) throw std::runtime_error("invalid replay speed");
             pace_replay(events, speed);
-            auto decisions = evaluate(events, rules, issues);
-            write_decisions(arg(argc, argv, "--out"), decisions, rules, dataset_hash);
+            const std::string output_path = arg(argc, argv, "--out");
+            const std::string stats_path = arg(argc, argv, "--stats-out");
+            bool stats_requested = false;
+            for (int i = 2; i < argc; ++i)
+                if (std::string(argv[i]) == "--stats-out") stats_requested = true;
+            if (stats_requested && stats_path.empty())
+                throw std::runtime_error("--stats-out requires a file path");
+            if (!stats_path.empty() &&
+                (same_file_or_path(stats_path, input_path) ||
+                 same_file_or_path(stats_path, arg(argc, argv, "--rules")) ||
+                 same_file_or_path(stats_path, output_path)))
+                throw std::runtime_error("replay stats output must be a separate file");
+            std::vector<std::uint64_t> decision_latency_ns;
+            const auto evaluation_started = std::chrono::steady_clock::now();
+            auto decisions = evaluate(events, rules, issues,
+                                      stats_path.empty() ? nullptr : &decision_latency_ns);
+            const auto evaluation_elapsed = std::chrono::steady_clock::now() - evaluation_started;
+            const auto evaluation_duration_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(evaluation_elapsed).count());
+            write_decisions(output_path, decisions, rules, dataset_hash);
+            if (!stats_path.empty())
+                write_replay_stats(stats_path, input_events.size(), decisions.size(),
+                                   evaluation_duration_ns, std::move(decision_latency_ns));
             std::cout << "decisions=" << decisions.size() << " simulation_only=true\n";
         } else if (command == "evaluate") {
             evaluate_labels(arg(argc, argv, "--pred"), arg(argc, argv, "--labels"),

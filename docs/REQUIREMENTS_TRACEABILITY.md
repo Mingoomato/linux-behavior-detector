@@ -25,8 +25,8 @@ Code presence is not full requirement verification. CTest covers generated fixtu
 | BHD-FR-019 | — | not implemented | NOT_STARTED |
 | BHD-FR-020 | — | not applicable | NOT_APPLICABLE |
 | BHD-NFR-01 | deterministic replay | `tests/window_replay.py` compares paced/unpaced output bytes | PASS_SELECTED_CASES |
-| BHD-NFR-02 | measurable evidence | synthetic confusion matrix, event IDs, and 100k wall-time/RSS recorded; p95 latency not measured | PARTIAL |
-| BHD-NFR-03 | 100k performance | one 100k run recorded in `docs/TEST_RESULTS.md`; no repeated baseline or p95 measurement | PARTIAL |
+| BHD-NFR-02 | measurable evidence | synthetic confusion matrix, event IDs, and 100k wall-time/RSS/p95 stats recorded; repeated baseline and representative data remain pending | PARTIAL |
+| BHD-NFR-03 | 100k performance | one 100k multi-window run reports wall time, peak RSS, and 100k per-decision latency samples in `docs/TEST_RESULTS.md`; no repeated baseline | PARTIAL |
 | BHD-NFR-04 | malformed input stability | required fields, UTF-8, timestamp, rule errors plus Release/ASan/UBSan; optional parser fuzzer completed 100k runs without crash, broader importer/timestamp fuzzing remains open | PARTIAL |
 | BHD-NFR-05 | synthetic expectation | 4/4 generated suspicious fixtures and 0/8 benign false positives in the generated wiring check only | PASS_SYNTHETIC_ONLY |
 | BHD-NFR-06 | explainability | every suspicious fixture includes rule-specific contributing event IDs; focused test asserts mapping | PASS_SELECTED_CASES |
