@@ -1,10 +1,12 @@
 #include "bdetect/json.hpp"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <fcntl.h>
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
@@ -22,6 +24,7 @@
 #include <vector>
 #include <openssl/evp.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 namespace {
@@ -366,12 +369,17 @@ bool read_limited_line(std::istream &in, std::string &line,
     return consumed;
 }
 
-void enforce_input_file_size(const std::string &path) {
+std::uintmax_t bounded_input_file_size(const std::string &path) {
     std::error_code error;
     const std::uintmax_t bytes = std::filesystem::file_size(path, error);
     if (error) throw std::runtime_error("cannot determine input file size: " + path);
     if (bytes > MAX_INPUT_FILE_BYTES)
         throw std::runtime_error("input file exceeds 512 MiB limit: " + path);
+    return bytes;
+}
+
+void enforce_input_file_size(const std::string &path) {
+    (void)bounded_input_file_size(path);
 }
 
 bool valid_utf8(const std::string &text) {
@@ -898,6 +906,219 @@ bool same_file_or_path(const std::string &left, const std::string &right) {
            left_stat.st_dev == right_stat.st_dev && left_stat.st_ino == right_stat.st_ino;
 }
 
+void write_all_fd(int fd, std::string_view content) {
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+        const ssize_t written = write(fd, content.data() + offset, content.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) throw std::runtime_error("file write failed");
+        offset += static_cast<std::size_t>(written);
+    }
+}
+
+void write_frozen_manifest(const std::string &path, std::string_view content) {
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0444);
+    if (fd < 0) throw std::runtime_error("freeze manifest path already exists or cannot be created");
+    bool open_fd = true;
+    try {
+        write_all_fd(fd, content);
+        if (fchmod(fd, 0444) != 0 || fsync(fd) != 0)
+            throw std::runtime_error("cannot persist frozen dataset manifest");
+        const int close_status = close(fd);
+        open_fd = false;
+        if (close_status != 0) throw std::runtime_error("cannot close frozen dataset manifest");
+    } catch (...) {
+        if (open_fd) (void)close(fd);
+        (void)unlink(path.c_str());
+        throw;
+    }
+}
+
+void append_audit_ledger(const std::string &path, std::string_view record) {
+    const int fd = open(path.c_str(), O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC |
+                        O_NOFOLLOW | O_NONBLOCK, 0600);
+    if (fd < 0) throw std::runtime_error("cannot open dataset audit ledger");
+    bool open_fd = true;
+    bool locked = false;
+    try {
+        if (flock(fd, LOCK_EX) != 0) throw std::runtime_error("cannot lock dataset audit ledger");
+        locked = true;
+        struct stat ledger_stat {};
+        if (fstat(fd, &ledger_stat) != 0 || !S_ISREG(ledger_stat.st_mode) || ledger_stat.st_size < 0 ||
+            static_cast<std::uintmax_t>(ledger_stat.st_size) > MAX_INPUT_FILE_BYTES ||
+            record.size() > MAX_RECORD_BYTES ||
+            static_cast<std::uintmax_t>(ledger_stat.st_size) > MAX_INPUT_FILE_BYTES - record.size())
+            throw std::runtime_error("dataset audit ledger size limit");
+        if (ledger_stat.st_uid != geteuid() || (ledger_stat.st_mode & 0077) != 0)
+            throw std::runtime_error("dataset audit ledger must be owner-only");
+        if (ledger_stat.st_size > 0) {
+            char last_byte = '\0';
+            if (pread(fd, &last_byte, 1U, ledger_stat.st_size - 1) != 1 || last_byte != '\n')
+                throw std::runtime_error("dataset audit ledger must end with a complete record");
+        }
+        write_all_fd(fd, record);
+        if (fdatasync(fd) != 0) throw std::runtime_error("cannot persist dataset audit ledger");
+        if (flock(fd, LOCK_UN) != 0) throw std::runtime_error("cannot unlock dataset audit ledger");
+        locked = false;
+        const int close_status = close(fd);
+        open_fd = false;
+        if (close_status != 0) throw std::runtime_error("cannot close dataset audit ledger");
+    } catch (...) {
+        if (locked) (void)flock(fd, LOCK_UN);
+        if (open_fd) (void)close(fd);
+        throw;
+    }
+}
+
+Value load_single_json_file(const std::string &path) {
+    (void)bounded_input_file_size(path);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open JSON manifest");
+    std::string line;
+    if (!read_limited_line(in, line, MAX_RECORD_BYTES) || line.empty())
+        throw std::runtime_error("manifest must contain one JSON record");
+    std::string extra;
+    if (read_limited_line(in, extra, MAX_RECORD_BYTES))
+        throw std::runtime_error("manifest must contain exactly one JSON record");
+    if (in.bad()) throw std::runtime_error("manifest read failure");
+    if (!valid_utf8(line)) throw std::runtime_error("manifest is not valid UTF-8");
+    return bdetect::json::Parser(line).parse();
+}
+
+std::string stable_file_sha256(const std::string &path) {
+    (void)bounded_input_file_size(path);
+    const std::string first = sha256_file(path);
+    const std::string second = sha256_file(path);
+    if (first != second) throw std::runtime_error("dataset changed while hashing: " + path);
+    return first;
+}
+
+std::int64_t epoch_now_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+bool is_sha256_hex(const std::string &value) {
+    return value.size() == 64U && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+
+void freeze_dataset(const std::string &dev_path, const std::string &holdout_path,
+                    const std::string &rules_path, const std::string &manifest_path) {
+    if (same_file_or_path(dev_path, holdout_path) ||
+        same_file_or_path(dev_path, rules_path) ||
+        same_file_or_path(holdout_path, rules_path) ||
+        same_file_or_path(manifest_path, dev_path) ||
+        same_file_or_path(manifest_path, holdout_path) ||
+        same_file_or_path(manifest_path, rules_path))
+        throw std::runtime_error("freeze manifest and datasets must use separate files");
+    const std::string rules_hash = stable_file_sha256(rules_path);
+    const Rules rules = load_rules(rules_path);
+    if (rules.sha256 != rules_hash || stable_file_sha256(rules_path) != rules_hash)
+        throw std::runtime_error("rules changed while freezing dataset split");
+    const std::uintmax_t dev_bytes = bounded_input_file_size(dev_path);
+    const std::uintmax_t holdout_bytes = bounded_input_file_size(holdout_path);
+    const std::string dev_hash = stable_file_sha256(dev_path);
+    const std::string holdout_hash = stable_file_sha256(holdout_path);
+    if (dev_hash == holdout_hash)
+        throw std::runtime_error("development and holdout datasets must have different content");
+    std::ostringstream manifest;
+    manifest << "{\"schema_version\":\"bdetect.dataset_freeze.v1\","
+             << "\"created_at_epoch_seconds\":" << epoch_now_seconds()
+             << ",\"split_method\":\"separate_files\",\"ruleset_revision\":\""
+             << escape(rules.revision) << "\",\"development_bytes\":" << dev_bytes
+             << ",\"development_dataset_sha256\":\"" << dev_hash
+             << "\",\"holdout_bytes\":" << holdout_bytes
+             << ",\"holdout_dataset_sha256\":\"" << holdout_hash
+             << "\",\"ruleset_sha256\":\"" << rules.sha256 << "\"}\n";
+    write_frozen_manifest(manifest_path, manifest.str());
+    std::cout << "{\"frozen\":true,\"development_dataset_sha256\":\"" << dev_hash
+              << "\",\"holdout_dataset_sha256\":\"" << holdout_hash
+              << "\",\"ruleset_sha256\":\"" << rules.sha256 << "\"}\n";
+}
+
+bool audit_frozen_dataset(const std::string &manifest_path, const std::string &dev_path,
+                          const std::string &holdout_path, const std::string &rules_path,
+                          const std::string &ledger_path) {
+    for (const std::string *input : {&manifest_path, &dev_path, &holdout_path, &rules_path}) {
+        if (same_file_or_path(ledger_path, *input))
+            throw std::runtime_error("audit ledger must be separate from every input");
+    }
+    if (same_file_or_path(dev_path, holdout_path))
+        throw std::runtime_error("development and holdout datasets must be separate files");
+    const std::string manifest_hash = stable_file_sha256(manifest_path);
+    const Value manifest = load_single_json_file(manifest_path);
+    const auto &manifest_fields = object_value(manifest, "dataset freeze manifest");
+    const std::set<std::string> allowed_fields = {
+        "schema_version", "created_at_epoch_seconds", "split_method", "ruleset_revision",
+        "development_bytes", "development_dataset_sha256", "holdout_bytes",
+        "holdout_dataset_sha256", "ruleset_sha256"
+    };
+    for (const auto &[field, value] : manifest_fields) {
+        (void)value;
+        if (!allowed_fields.contains(field))
+            throw std::runtime_error("unknown dataset freeze manifest field: " + field);
+    }
+    if (required_text(manifest, "schema_version") != "bdetect.dataset_freeze.v1" ||
+        required_text(manifest, "split_method") != "separate_files")
+        throw std::runtime_error("unsupported dataset freeze manifest");
+    const std::string expected_dev = required_text(manifest, "development_dataset_sha256");
+    const std::string expected_holdout = required_text(manifest, "holdout_dataset_sha256");
+    const std::string expected_rules = required_text(manifest, "ruleset_sha256");
+    const double *expected_dev_bytes_value = std::get_if<double>(&required(manifest, "development_bytes").data);
+    const double *expected_holdout_bytes_value = std::get_if<double>(&required(manifest, "holdout_bytes").data);
+    if (!expected_dev_bytes_value || !expected_holdout_bytes_value ||
+        !std::isfinite(*expected_dev_bytes_value) || !std::isfinite(*expected_holdout_bytes_value) ||
+        *expected_dev_bytes_value < 0 || *expected_holdout_bytes_value < 0 ||
+        *expected_dev_bytes_value > static_cast<double>(MAX_INPUT_FILE_BYTES) ||
+        *expected_holdout_bytes_value > static_cast<double>(MAX_INPUT_FILE_BYTES) ||
+        std::floor(*expected_dev_bytes_value) != *expected_dev_bytes_value ||
+        std::floor(*expected_holdout_bytes_value) != *expected_holdout_bytes_value)
+        throw std::runtime_error("invalid file size in dataset freeze manifest");
+    if (!is_sha256_hex(expected_dev) || !is_sha256_hex(expected_holdout) ||
+        !is_sha256_hex(expected_rules) || expected_dev == expected_holdout)
+        throw std::runtime_error("invalid SHA-256 in dataset freeze manifest");
+    const double *created_at = std::get_if<double>(&required(manifest, "created_at_epoch_seconds").data);
+    if (!created_at || !std::isfinite(*created_at) || *created_at < 0 ||
+        *created_at > 9007199254740991.0 || std::floor(*created_at) != *created_at)
+        throw std::runtime_error("invalid creation time in dataset freeze manifest");
+    const std::uintmax_t dev_bytes = bounded_input_file_size(dev_path);
+    const std::uintmax_t holdout_bytes = bounded_input_file_size(holdout_path);
+    const std::string current_rules_hash = stable_file_sha256(rules_path);
+    const Rules rules = load_rules(rules_path);
+    if (rules.sha256 != current_rules_hash || stable_file_sha256(rules_path) != current_rules_hash)
+        throw std::runtime_error("rules changed while auditing frozen dataset");
+    const std::string dev_hash = stable_file_sha256(dev_path);
+    const std::string holdout_hash = stable_file_sha256(holdout_path);
+    const bool dev_matches = dev_hash == expected_dev &&
+        static_cast<double>(dev_bytes) == *expected_dev_bytes_value;
+    const bool holdout_matches = holdout_hash == expected_holdout &&
+        static_cast<double>(holdout_bytes) == *expected_holdout_bytes_value;
+    const bool rules_match = rules.sha256 == expected_rules &&
+        required_text(manifest, "ruleset_revision") == rules.revision;
+    const bool unchanged = dev_matches && holdout_matches && rules_match;
+    if (stable_file_sha256(manifest_path) != manifest_hash)
+        throw std::runtime_error("freeze manifest changed during audit");
+    std::ostringstream ledger_record;
+    ledger_record << "{\"schema_version\":\"bdetect.dataset_audit.v1\","
+                  << "\"observed_at_epoch_seconds\":" << epoch_now_seconds()
+                  << ",\"manifest_sha256\":\"" << manifest_hash
+                  << "\",\"development\":{\"expected_sha256\":\"" << expected_dev
+                  << "\",\"observed_sha256\":\"" << dev_hash << "\",\"matches\":"
+                  << (dev_matches ? "true" : "false") << "},\"holdout\":{\"expected_sha256\":\""
+                  << expected_holdout << "\",\"observed_sha256\":\"" << holdout_hash
+                  << "\",\"matches\":" << (holdout_matches ? "true" : "false")
+                  << "},\"ruleset\":{\"expected_sha256\":\"" << expected_rules
+                  << "\",\"observed_sha256\":\"" << rules.sha256 << "\",\"matches\":"
+                  << (rules_match ? "true" : "false") << "},\"status\":\""
+                  << (unchanged ? "unchanged" : "modified") << "\"}\n";
+    append_audit_ledger(ledger_path, ledger_record.str());
+    std::cout << "{\"unchanged\":" << (unchanged ? "true" : "false")
+              << ",\"audit_recorded\":true}\n";
+    return unchanged;
+}
+
 void validate_events(const std::string &file) {
     auto events = load_events(file);
     std::cout << "{\"valid\":true,\"records\":" << events.size() << "}\n";
@@ -1352,13 +1573,23 @@ int main(int argc, char **argv) {
             std::cout << "bdetect replay --input FILE --rules FILE --out FILE [--speed EVENT_TIME_MULTIPLIER] [--stats-out FILE]\n"
                          "bdetect evaluate --pred FILE --labels CSV --report FILE [--csv-report FILE] [--html-report FILE]\n"
                          "bdetect analyze-rules --input DECISIONS --report FILE\n"
+                         "bdetect dataset-freeze --dev FILE --holdout FILE --rules FILE --manifest NEW-FILE\n"
+                         "bdetect dataset-audit --manifest FILE --dev FILE --holdout FILE --rules FILE --ledger FILE\n"
                          "bdetect rules-validate --file FILE\n"
                          "bdetect generate-fixtures --root SANDBOX --out NEW-DIR\n"
                          "bdetect explain --decision-id ID --input DECISIONS\n";
             return argc < 2 ? 2 : 0;
         }
         std::string command = argv[1];
-        if (command == "rules-validate") {
+        if (command == "dataset-freeze") {
+            freeze_dataset(arg(argc, argv, "--dev"), arg(argc, argv, "--holdout"),
+                           arg(argc, argv, "--rules"), arg(argc, argv, "--manifest"));
+        } else if (command == "dataset-audit") {
+            const bool unchanged = audit_frozen_dataset(arg(argc, argv, "--manifest"),
+                arg(argc, argv, "--dev"), arg(argc, argv, "--holdout"),
+                arg(argc, argv, "--rules"), arg(argc, argv, "--ledger"));
+            if (!unchanged) return 1;
+        } else if (command == "rules-validate") {
             (void)load_rules(arg(argc, argv, "--file"));
             puts("{\"valid\":true}");
         } else if (command == "generate-fixtures") {

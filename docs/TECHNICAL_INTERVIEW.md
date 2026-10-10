@@ -59,5 +59,10 @@ Questions only; no answer key is provided. Use the source, synthetic evidence, a
 44. What does the ten-million pair-update cap bound? Why does the analysis reject dense input rather than truncate the report silently?
 45. How do the 512 MiB file limit and per-record limit complement event-count/cardinality caps? Which allocations still remain proportional to the complete batch?
 46. In `evaluate`, when can an `Event` string payload be released safely while `by_host` stores pointers into the vector? Which scalar fields and indexes still remain alive, and what would invalidate the lifetime argument?
+47. What exactly does `dataset-freeze` bind into the manifest? Why are separate files and distinct content hashes both required?
+48. Why does a matching SHA-256 not prove that the holdout was independently collected or kept out of rule tuning? What external evidence would strengthen that claim?
+49. Explain how `O_CREAT|O_EXCL|O_NOFOLLOW` protects manifest creation. Which parent-directory or administrator actions remain outside that guarantee?
+50. How does `dataset-audit` ensure a changed hash is recorded before it returns failure? What do `flock`, `O_APPEND`, and `fdatasync` each contribute, and which one is advisory?
+51. Why is the audit ledger owner-only and size-bounded? How could the owner still alter its history, and how would a signed or remote ledger change that threat model?
 
-The optional reports, rule-correlation analysis, aggregate input-size checks, and active-window payload release have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.
+The optional reports, rule-correlation analysis, dataset freeze/audit, aggregate input-size checks, and active-window payload release have not yet been technically verified. Automated build and test status does not establish the owner's personal mastery. That status remains unassessed without direct evidence from an independent reproduction or technical defense.

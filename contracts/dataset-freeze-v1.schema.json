@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linuxsecurity.local/bdetect/contracts/dataset-freeze-v1.schema.json",
+  "title": "BHD Frozen Dataset Split v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "created_at_epoch_seconds", "split_method", "ruleset_revision", "development_bytes", "development_dataset_sha256", "holdout_bytes", "holdout_dataset_sha256", "ruleset_sha256"],
+  "properties": {
+    "schema_version": {"const": "bdetect.dataset_freeze.v1"},
+    "created_at_epoch_seconds": {"type": "integer", "minimum": 0},
+    "split_method": {"const": "separate_files"},
+    "ruleset_revision": {"type": "string", "minLength": 1, "maxLength": 128},
+    "development_bytes": {"type": "integer", "minimum": 0, "maximum": 536870912},
+    "development_dataset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "holdout_bytes": {"type": "integer", "minimum": 0, "maximum": 536870912},
+    "holdout_dataset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ruleset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

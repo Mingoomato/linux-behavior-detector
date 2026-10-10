@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linuxsecurity.local/bdetect/contracts/dataset-audit-v1.schema.json",
+  "title": "BHD Dataset Audit Ledger Entry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "observed_at_epoch_seconds", "manifest_sha256", "development", "holdout", "ruleset", "status"],
+  "properties": {
+    "schema_version": {"const": "bdetect.dataset_audit.v1"},
+    "observed_at_epoch_seconds": {"type": "integer", "minimum": 0},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "development": {"$ref": "#/$defs/comparison"},
+    "holdout": {"$ref": "#/$defs/comparison"},
+    "ruleset": {"$ref": "#/$defs/comparison"},
+    "status": {"enum": ["unchanged", "modified"]}
+  },
+  "$defs": {
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_sha256", "observed_sha256", "matches"],
+      "properties": {
+        "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "observed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "matches": {"type": "boolean"}
+      }
+    }
+  }
+}

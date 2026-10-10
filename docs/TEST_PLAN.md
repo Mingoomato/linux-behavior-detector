@@ -9,6 +9,7 @@
 - For `analyze-rules`, verify pair contingency counts, Jaccard and phi values for identical/disjoint/partially co-active rules, repeated reasons within one decision, empty input, malformed reason arrays, output alias rejection, and each decision/rule/pair-update limit. Validate the output against `contracts/rule-analysis-v1.schema.json`; explicitly document that overlapping windows are dependent.
 - Exercise 512 MiB aggregate file-size refusal and read-time growth refusal for event, prediction, and rule-analysis inputs; test exact-boundary acceptance using sparse synthetic data without allocating an unbounded corpus.
 - Check event payload lifetime at 10/30/60-second window expiration and large time jumps; ensure copied evidence for emitted decisions remains available after expired event strings are released.
+- For dataset freezing, verify separate-file/hash checks, exact ruleset-byte freeze, no manifest overwrite, read-only mode, symlink/output alias rejection, stable hashing, and both dataset schemas. For audit, exercise unchanged and modified dev/holdout/rules files, confirm mismatch is appended before status 1, verify owner-only permissions/locking/size limit, and reject an incomplete trailing ledger record.
 - Verify `--stats-out` percentiles and schema, empty-result nulls, refusal of input/rule/output path aliases, and byte-identical decision JSONL with stats enabled.
 - Measure 100k records, peak RSS, p95 decision latency, and runtime on a documented machine.
 

@@ -8,7 +8,7 @@
 
 `bdetect`는 파일 이벤트를 안전한 합성 JSONL로 재생하고, 시간 창의 행위 특징을 설명 가능한 규칙 점수로 바꾸는 Linux 보안 학습·연구 프로젝트입니다. 이벤트 검증, 순서/중복 처리, 시간 창 집계, 규칙 기여도, 판정 근거와 평가 지표가 어떻게 연결되는지 보여 줍니다. 실제 랜섬웨어를 실행하거나 사용자 파일을 읽고·변경·차단하지 않습니다. 프로세스 행위자를 추정하지 않으며 결과는 항상 `simulation_only=true`입니다.
 
-현재 작업 트리에는 입력 파일 크기 상한, 선택형 CSV·HTML 평가 보고서, 시간순 판정 내역, 규칙 상관관계 요약 기능이 추가되었습니다. 이 변경은 아직 기술 검증을 거치지 않았으며, 아래의 과거 검증 기록은 이전 코드 상태에만 적용됩니다.
+현재 작업 트리에는 입력 파일 크기 상한, 선택형 CSV·HTML 평가 보고서, 시간순 판정 내역, 규칙 상관관계 요약, 개발/holdout 파일 고정·감사 기능이 추가되었습니다. 이 변경은 아직 기술 검증을 거치지 않았으며, 아래의 과거 검증 기록은 이전 코드 상태에만 적용됩니다.
 
 ### 빌드 및 실행
 
@@ -30,6 +30,13 @@ mkdir "$tmp/sandbox"
 `evaluate`는 기존 JSON 지표 보고서를 유지하면서 CSV 지표·판정 타임라인과 한국어·영어 정적 HTML 혼동행렬·타임라인을 선택적으로 생성합니다. 보고서에는 원문 파일 경로를 넣지 않고 판정의 entity key, 시간 창, 정답·예측·결과와 제공된 점수를 포함합니다. CSV는 따옴표 처리와 CRLF 행 구분을 사용하며, CSV/HTML 타임라인은 최대 100,000행입니다. 결과는 합성 평가에 대한 시뮬레이션 기록이지 악성코드 판정이 아닙니다.
 
 `analyze-rules`는 판정별 규칙 동시 활성화 표, Jaccard 유사도와 phi 계수를 `bdetect.rule_analysis.v1` JSON으로 요약합니다. 최대 1,000,000개 판정, 256개 규칙, 10,000,000개의 pair 업데이트로 제한합니다. 겹치는 시간 창은 독립 표본이 아니므로 이 수치는 기술 검토를 위한 설명 통계입니다. 이 도구는 규칙 가중치를 자동으로 변경하지 않습니다.
+
+개발 데이터와 holdout 데이터는 별도의 파일로 준비한 뒤 `dataset-freeze`로 SHA-256과 ruleset SHA-256을 새 읽기 전용 manifest에 고정합니다. 이후 각 holdout 평가 전에 `dataset-audit`를 실행하면 manifest와 데이터/ruleset hash 비교 결과를 owner-only JSONL ledger에 추가합니다. 불일치도 ledger에 먼저 기록하고 종료 코드 1을 반환합니다. 이 기능은 데이터를 자동 분할하지 않으며, 로컬 파일 권한과 append 기록만으로 변조 방지나 데이터의 독립성을 증명하지 않습니다.
+
+```sh
+./build/bdetect dataset-freeze --dev development.ndjson --holdout holdout.ndjson --rules rules/baseline.json --manifest frozen-datasets.json
+./build/bdetect dataset-audit --manifest frozen-datasets.json --dev development.ndjson --holdout holdout.ndjson --rules rules/baseline.json --ledger dataset-audit.jsonl
+```
 
 선택적인 Clang/libFuzzer JSON parser 타깃은 별도 빌드에서 실행할 수 있습니다. 이 타깃은 일반 실행 파일의 의존성에 포함되지 않습니다.
 
@@ -53,7 +60,7 @@ cmake --build /tmp/bdetect-fuzz-build --target bdetect-json-fuzz
 
 `bdetect` is a Linux security learning and research lab. It replays safe synthetic file-event JSONL and turns time-window behavior features into explainable rule scores. The project demonstrates how validation, deduplication and reordering, window aggregation, rule contributions, evidence, and evaluation metrics fit together. It does not execute ransomware, read or modify user files, block access, or infer process attribution. Every decision is marked `simulation_only=true`.
 
-The current working tree adds a total input-file size bound, optional CSV/HTML evaluation reports, a chronological decision timeline, and a rule co-activation analysis command. These changes have not been technically verified; historical verification notes below apply only to the earlier code state.
+The current working tree adds a total input-file size bound, optional CSV/HTML evaluation reports, a chronological decision timeline, rule co-activation analysis, and development/holdout freeze and audit commands. These changes have not been technically verified; historical verification notes below apply only to the earlier code state.
 
 ### Build and run
 
@@ -75,6 +82,13 @@ mkdir "$tmp/sandbox"
 `evaluate` preserves the existing JSON metrics report and can also emit a CSV metrics/timeline report and a Korean/English static HTML confusion-matrix/timeline report. Reports omit raw file paths and include the decision entity key, time window, actual/predicted labels, outcome, and score when present. CSV cells are quoted and records use CRLF line endings. CSV/HTML timelines are limited to 100,000 rows. These outputs describe a simulation evaluation, not a malware verdict.
 
 `analyze-rules` summarizes per-decision rule co-activation, Jaccard similarity, and the phi coefficient as `bdetect.rule_analysis.v1` JSON. It is bounded to 1,000,000 decisions, 256 distinct rules, and 10,000,000 pair updates. Overlapping windows are dependent observations, so these values are descriptive review aids; the command never changes rule weights automatically.
+
+Prepare development and holdout data as separate files. `dataset-freeze` creates a new read-only manifest with their exact SHA-256 values, sizes, and the validated rule-file hash. Before each holdout evaluation, `dataset-audit` compares those values and appends an owner-only JSONL record; a mismatch is recorded before the command returns status 1. This does not create the split and does not cryptographically prove that the holdout is independent or that a local ledger has not been rewritten. Keep the manifest and ledger in trusted version control or another protected location.
+
+```sh
+./build/bdetect dataset-freeze --dev development.ndjson --holdout holdout.ndjson --rules rules/baseline.json --manifest frozen-datasets.json
+./build/bdetect dataset-audit --manifest frozen-datasets.json --dev development.ndjson --holdout holdout.ndjson --rules rules/baseline.json --ledger dataset-audit.jsonl
+```
 
 Replay is fast and offline by default. Optionally pass `--speed 10` to pace event-time intervals at 10x using monotonic deadlines. Runs whose scheduled wait would exceed one hour are rejected. Pacing does not change the decision set. RFC 3339 timezone offsets are normalized; fractional seconds are discarded because windows currently have one-second precision. Each decision records the SHA-256 of the exact rules and input files, each contributing rule's observed value/operator/threshold/weight, and source event IDs. Add `--stats-out replay-stats.json` to emit a separate `bdetect.replay_stats.v1` record with p50/p95/p99/max per-decision scoring latency; it leaves decision JSONL unchanged and excludes parsing, pacing, and serialization time.
 
