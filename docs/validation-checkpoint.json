@@ -10,5 +10,15 @@
   },
   "owner_mastery": "unassessed",
   "remote_ci": "blocked_before_execution_account_billing_or_spending_limit",
-  "remote_ci_url": "https://github.com/Mingoomato/linux-behavior-detector/actions/runs/38107485983"
+  "remote_ci_url": "https://github.com/Mingoomato/linux-behavior-detector/actions/runs/38107485983",
+  "local_followup": {
+    "date": "2026-10-11",
+    "host": "Kali Linux 7.1.5+kali-amd64 x86_64",
+    "gcc_release_ctest": "2/2 pass",
+    "clang_release_ctest": "2/2 pass",
+    "clang_asan_ubsan": "2/2 CTest pass",
+    "fuzz_smoke_requested_runs": 20000,
+    "kernel_module_compile": "not_applicable",
+    "full_srs_status": "pending"
+  }
 }
