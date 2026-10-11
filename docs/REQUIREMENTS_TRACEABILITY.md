@@ -1,5 +1,7 @@
 # Requirements traceability (SRS-02)
 
+Latest scoped evidence: [2026-10-11 validation checkpoint](VALIDATION_CHECKPOINT.md). Historical pending/unverified rows below remain applicable to gates not exercised by that checkpoint.
+
 Code presence is not full requirement verification. CTest covers generated fixtures plus focused contract, rule, replay, and metric cases. See `docs/TEST_RESULTS.md` for remaining SRS gates.
 
 | Requirement | Source / artifact | Verification | Status |

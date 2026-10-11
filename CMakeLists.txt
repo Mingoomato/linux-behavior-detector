@@ -15,6 +15,10 @@ target_compile_options(bdetect PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME behavior-stream COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/stream_replay.py $<TARGET_FILE:bdetect>
+        ${CMAKE_CURRENT_SOURCE_DIR}/rules/baseline.json)
     add_test(NAME behavior-fixtures COMMAND ${CMAKE_COMMAND} -E env BIN_DIR=$<TARGET_FILE_DIR:bdetect> ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke.sh)
 endif()
 

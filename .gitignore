@@ -15,3 +15,5 @@ cmake-build-*/
 *.srl
 *.ndjson
 *.pid
+
+/build-*/

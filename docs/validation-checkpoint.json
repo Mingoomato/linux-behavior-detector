@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-11",
+  "environment": "Linux 7.1.5+kali-amd64 x86_64; GCC 16.2.0; CMake Release; Python 3.14.7",
+  "result": "2/2 CTest passed, 0.58 s.",
+  "scope": "Existing fixture/window/metrics suite plus stream watermark ordering, exact duplicate suppression, late-input atomic rejection and 4,097-event queue-overflow degradation.",
+  "remaining": "Online sequence-gap attribution, importer fuzzing, representative holdout evidence and scale/OS gates remain pending.",
+  "source_sha256": {
+    "src/bdetect.cpp": "2054348e8f7a9a3423f38856999dadfe21588ebf12b52d72913a25021a02df9c",
+    "tests/stream_replay.py": "265446df5021268e5e842ad56236e1cc53903a7aa919015f8ebf6ae6acea5a58"
+  },
+  "owner_mastery": "unassessed",
+  "remote_ci": "new_workflow_pending_remote_run"
+}

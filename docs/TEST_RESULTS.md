@@ -1,5 +1,7 @@
 # Test Results — Linux Ransomware Behavior Detection Lab
 
+> Latest / 최신: [2026-10-11 checkpoint](VALIDATION_CHECKPOINT.md). Earlier entries below describe their own historical revisions; they do not override this scoped checkpoint.
+
 Status: the current working tree is unverified. The historical Release, Clang, sanitizer, and selected synthetic results below describe the source before the dataset freeze/audit commands, active-window payload release, 512 MiB aggregate input cap, optional CSV/HTML evaluation reports, bounded rule-correlation analysis, `replay --stream`, and its event-time watermark were implemented. No builds, tests, schema checks, analyzers, or diff validation have been run for these current changes. Overall SRS verification remains partial; automated results do not establish owner mastery or real-world detection efficacy.
 
 ## Environment
